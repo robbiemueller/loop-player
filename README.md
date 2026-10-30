@@ -49,7 +49,7 @@ Turn on **Phone remote** in the hold menu. The screen shows an address such as `
 Good to know:
 - The remote is **off until you turn it on**, and only the hold menu can turn it on. It answers only devices on your
   local network, over plain HTTP. Your phone signs in once with the PIN and then stays signed in. Five wrong PINs
-  lock that phone or computer out for a minute, and 20 from anywhere in ten minutes pause all PIN tries; phones already signed in keep working. Anyone on your Wi-Fi who sees
+  lock that phone or computer out for a minute, and 20 from anywhere in ten minutes pause all PIN tries; phones already signed in keep working, and opening the hold menu on the device clears every lockout. Anyone on your Wi-Fi who sees
   the PIN can use it.
 - To see the address and PIN again, hold 3 s: they're on the **Phone remote** line of the menu. **New PIN** (just
   below it) makes a fresh PIN and signs out every phone.

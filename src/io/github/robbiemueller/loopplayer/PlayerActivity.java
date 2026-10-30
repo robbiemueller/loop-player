@@ -885,6 +885,8 @@ public class PlayerActivity extends Activity implements VideoPicker.Listener {
         final List<String> labels = new ArrayList<>();
         final List<Runnable> actions = new ArrayList<>();
         final boolean remoteOn = remote != null;
+        // Whoever is holding the screen can read the PIN anyway: let them past any lockout someone else caused.
+        if (remoteOn) remote.resetLockouts();
         labels.add("Choose videos");
         actions.add(new Runnable() { public void run() { openPicker(); } });
         labels.add(remoteOn ? "Phone remote: on  (tap for off)\n" + remoteAddress() + "   PIN " + remotePin()
