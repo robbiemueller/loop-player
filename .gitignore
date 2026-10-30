@@ -1,0 +1,4 @@
+# Build output and signing keys: never commit a keystore
+build/
+*.keystore
+*.jks

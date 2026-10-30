@@ -1,0 +1,87 @@
+# Loop Player
+
+Turn an old Android screen into a looping video sign. Loop Player is a 16 KB app that plays the videos in one
+folder full screen, forever: no playback controls, no status bar, no ads, no accounts, no network. It suits cheap
+tabletop signage players, old tablets, digital photo frames and Android TV boxes running **Android 5.0 or newer**.
+
+It started as the replacement player for the [FYD-835S tabletop sign](https://github.com/robbiemueller/fyd-835s-tabletop-signage),
+but nothing in it is specific to that device.
+
+## What it does
+
+- **Plays** every `.mp4`, `.mkv` and `.webm` in **`Movies/loop/`** on the device's storage (`/sdcard/Movies/loop/`),
+  in name order, forever. A single file loops **seamlessly** inside the media player.
+- **Double-tap:** sound off/on. It's remembered across restarts.
+- **Hold a finger down for 3 seconds:** opens the menu.
+  - **Sound** on/off
+  - **Picture:** *fit* the whole video (letterbox, the default) or *fill* the screen (crop)
+  - **Home screen:** makes Loop Player the launcher, so it opens at boot and whenever Home is pressed (kiosk mode)
+  - **Reload videos**, **Android settings**, **Exit player**
+- **Starts at boot.** On Android 9 and older, it does this on its own. On Android 10+, turn on **Home screen** in the
+  menu, because newer Android won't let apps open a screen at boot any other way.
+- **Rotation** follows the device (and its rotation lock).
+
+## Install
+
+1. Download `LoopPlayer.apk` from [Releases](../../releases) and install it: open it on the device (allow installs
+   from unknown sources), or from a computer run `adb install -r LoopPlayer.apk`.
+2. Open **Loop Player** and allow access to videos. On Android 13+, choose **Allow all**; with "selected only" it
+   can't see new files.
+3. Put videos in `Movies/loop/` with USB file transfer, a file manager, or:
+   ```sh
+   adb shell mkdir -p /sdcard/Movies/loop
+   adb push my-loop.mp4 /sdcard/Movies/loop/
+   ```
+4. Hold 3 s → **Reload videos** (or restart the app).
+
+## Remote control over ADB
+
+```sh
+adb shell am start -n io.github.robbiemueller.loopplayer/.PlayerActivity --ez reload true   # rescan the folder
+adb shell am start -n io.github.robbiemueller.loopplayer/.PlayerActivity --ez mute true     # or false
+adb shell am start -n io.github.robbiemueller.loopplayer/.PlayerActivity --ez fill true     # or false (fit)
+adb shell am start -n io.github.robbiemueller.loopplayer/.PlayerActivity --ez home true     # or false
+```
+
+## Tips for the video
+
+- **Encode it for the screen.** Match the panel's resolution and use plain H.264 (Main profile) in an MP4. Old
+  hardware decoders choke on HEVC, 10-bit and very high bitrates:
+  ```sh
+  ffmpeg -i in.mp4 -vf scale=1280:-2 -c:v libx264 -profile:v main -crf 20 -pix_fmt yuv420p \
+    -c:a aac -b:a 160k -movflags +faststart out.mp4
+  ```
+- **Seamless loops:** start and end on the same frame (black is easiest) with the sound faded out.
+- **Tiny speakers:** master loud (about -13 LUFS) and roll off everything below about 140 Hz.
+
+## Tested
+
+On an FYD-835S (Rockchip RK3126, Android 6.0.1), we tested:
+- the permission prompt
+- playback and seamless looping
+- double-tap mute
+- fit and fill
+- the hold menu
+- the home-screen chooser
+
+It builds for Android 15 (target SDK 35), but **hasn't been run on Android 10+ hardware yet**. Reports welcome.
+
+Known quirk: on that device's old Launcher3, uninstalling Loop Player right after offering it as a home screen made
+Launcher3 crash once ("Launcher3 has stopped" → OK). It recovered by itself.
+
+## Build
+
+No Gradle or Android Studio project: just the SDK command-line tools (`javac`, `d8`, `aapt2`, `zipalign`,
+`apksigner`) from an Android Studio install.
+
+```sh
+./build.sh --install     # macOS / Linux (untested so far)
+.\build.ps1 -Install     # Windows (tested)
+```
+
+The first build creates `local.keystore` here (git-ignored). Releases are signed with a different key, so to switch
+from a release to your own build, uninstall first.
+
+## License
+
+MIT
