@@ -79,11 +79,11 @@ public class VideoPicker extends FrameLayout {
         }
     };
 
-    public VideoPicker(Context context, Listener listener) {
+    public VideoPicker(Context context, Listener listener, Thumbnails thumbnails) {
         super(context);
         this.listener = listener;
+        this.thumbnails = thumbnails;
         density = getResources().getDisplayMetrics().density;
-        thumbnails = new Thumbnails(new File(context.getCacheDir(), "thumbs"));
         setVisibility(GONE);
 
         // Tapping the dimmed strip above the sheet closes it.
@@ -426,81 +426,6 @@ public class VideoPicker extends FrameLayout {
     private static class AbsListParams extends android.widget.AbsListView.LayoutParams {
         AbsListParams(int w, int h) {
             super(w, h);
-        }
-    }
-
-    /** Grabs a frame from a few seconds into each video on a background thread, cached in memory and on disk. */
-    private static class Thumbnails {
-        interface Callback {
-            void onThumbnail(File source, Bitmap bitmap);
-        }
-
-        private final File dir;
-        private final ExecutorService worker = Executors.newSingleThreadExecutor();
-        private final Handler main = new Handler(Looper.getMainLooper());
-        private final LruCache<String, Bitmap> memory = new LruCache<>(24);
-
-        Thumbnails(File dir) {
-            this.dir = dir;
-            dir.mkdirs();
-        }
-
-        void load(final File f, final Callback callback) {
-            final String key = f.getName() + "-" + f.length() + "-" + f.lastModified();
-            Bitmap cached = memory.get(key);
-            if (cached != null) {
-                callback.onThumbnail(f, cached);
-                return;
-            }
-            worker.execute(new Runnable() {
-                @Override
-                public void run() {
-                    final Bitmap bitmap = make(f, key);
-                    if (bitmap == null) return;
-                    memory.put(key, bitmap);
-                    main.post(new Runnable() {
-                        @Override
-                        public void run() {
-                            callback.onThumbnail(f, bitmap);
-                        }
-                    });
-                }
-            });
-        }
-
-        private Bitmap make(File f, String key) {
-            File cacheFile = new File(dir, key.replaceAll("[^A-Za-z0-9._-]", "_") + ".jpg");
-            if (cacheFile.exists()) return BitmapFactory.decodeFile(cacheFile.getPath());
-            MediaMetadataRetriever retriever = new MediaMetadataRetriever();
-            try {
-                retriever.setDataSource(f.getPath());
-                long durationMs = 0;
-                try {
-                    durationMs = Long.parseLong(retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION));
-                } catch (Exception ignored) {
-                    // Unknown length: fall back to the first frame.
-                }
-                // A few seconds in, since loops often start on black.
-                long at = Math.min(durationMs / 3, 12000) * 1000;
-                Bitmap frame = retriever.getFrameAtTime(at, MediaMetadataRetriever.OPTION_CLOSEST_SYNC);
-                if (frame == null) return null;
-                int w = 320;
-                int h = Math.max(1, Math.round(frame.getHeight() * (w / (float) frame.getWidth())));
-                Bitmap small = Bitmap.createScaledBitmap(frame, w, h, true);
-                if (small != frame) frame.recycle();
-                FileOutputStream out = new FileOutputStream(cacheFile);
-                small.compress(Bitmap.CompressFormat.JPEG, 85, out);
-                out.close();
-                return small;
-            } catch (Exception e) {
-                return null;
-            } finally {
-                try {
-                    retriever.release();
-                } catch (Exception ignored) {
-                    // Some old devices throw from release(); nothing to clean up.
-                }
-            }
         }
     }
 }

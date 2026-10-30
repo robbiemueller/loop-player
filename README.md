@@ -1,7 +1,7 @@
 # Loop Player
 
-Turn an old Android screen into a looping video sign. Loop Player is a 30 KB app that plays the videos in one
-folder full screen, forever: no playback controls, no status bar, no ads, no accounts, no network. It suits cheap
+Turn an old Android screen into a looping video sign. Loop Player is a lightweight app that plays the videos in one
+folder full screen, forever: no playback controls, no status bar, no ads, no accounts, no cloud. It suits cheap
 tabletop signage players, old tablets, digital photo frames and Android TV boxes running **Android 5.0 or newer**.
 
 It started as the replacement player for the [FYD-835S tabletop sign](https://github.com/robbiemueller/fyd-835s-tabletop-signage),
@@ -21,13 +21,40 @@ but nothing in it is specific to that device.
 - **Double-tap:** sound off/on. It's remembered across restarts.
 - **Hold a finger down for 3 seconds:** opens the menu.
   - **Choose videos** (the same panel as swiping up)
+  - **Phone remote** on/off (see below)
   - **Sound** on/off
   - **Picture:** *fit* the whole video (letterbox, the default) or *fill* the screen (crop)
   - **Home screen:** makes Loop Player the launcher, so it opens at boot and whenever Home is pressed (kiosk mode)
+  - **Sleep:** the screen goes black at its lowest backlight and playback pauses; tap the screen to wake it
   - **Reload videos**, **Android settings**, **Exit player**
 - **Starts at boot.** On Android 9 and older, it does this on its own. On Android 10+, turn on **Home screen** in the
   menu, because newer Android won't let apps open a screen at boot any other way.
 - **Rotation** follows the device (and its rotation lock).
+
+## Phone remote and schedule
+
+Turn on **Phone remote** in the hold menu. The screen shows an address such as `http://192.168.1.50:8080` and a
+6-digit PIN. Open the address in your phone's browser on the same Wi-Fi, enter the PIN once, and you can:
+
+- pick what loops (tap to build the loop, ▶ to loop one, **All**), with the same rules as the swipe-up panel
+- turn the sound on or off and set the volume
+- set the brightness, fit or fill, and put the screen to **sleep** or wake it
+- **add videos** from your phone, or delete them
+- open another app on the device, or bring Loop Player back
+- set a **schedule**: a list of times of day, each of which can turn the screen on or off, set the brightness, turn
+  the sound on or off and change what loops. For example: 17:30 on at full brightness with every video, 21:00 dim
+  to 40% and loop just two, 23:30 off. Each time takes effect once a day; anything you change by hand in between
+  stays until the next time.
+
+Good to know:
+- The remote is **off until you turn it on**. It answers only on your local network, over plain HTTP, and only
+  with the PIN (five wrong tries lock it for a minute). Anyone on your Wi-Fi who sees the PIN can use it.
+- To see the address and PIN again, hold 3 s: they're on the **Phone remote** line of the menu.
+- The schedule and the remote work while Loop Player is open. Sleep dims the backlight to its minimum, since apps
+  can't switch the panel fully off.
+- Adding and deleting videos needs storage access on Android 6–10 (Loop Player asks when you turn the remote on).
+- Opening other apps from the remote works on Android 9 and older; Android 10+ may block it while Loop Player isn't
+  on screen.
 
 ## Install
 
@@ -52,7 +79,14 @@ adb shell am start -n io.github.robbiemueller.loopplayer/.PlayerActivity --ez al
 adb shell am start -n io.github.robbiemueller.loopplayer/.PlayerActivity --ez mute true     # or false
 adb shell am start -n io.github.robbiemueller.loopplayer/.PlayerActivity --ez fill true     # or false (fit)
 adb shell am start -n io.github.robbiemueller.loopplayer/.PlayerActivity --ez home true     # or false
+adb shell am start -n io.github.robbiemueller.loopplayer/.PlayerActivity --ez remote true   # phone remote on, or false
+adb shell am start -n io.github.robbiemueller.loopplayer/.PlayerActivity --ez sleep true    # screen to sleep, or false
 ```
+
+The phone remote's JSON API works from scripts too: send the PIN as an `X-Pin` header, and an `X-Remote: 1` header
+on anything that changes something, e.g.
+`curl -H "X-Pin: 123456" http://192.168.1.50:8080/api/state`. The endpoints are listed at the top of
+[`RemoteServer.java`](src/io/github/robbiemueller/loopplayer/RemoteServer.java).
 
 ## Tips for the video
 
@@ -71,6 +105,8 @@ On an FYD-835S (Rockchip RK3126, Android 6.0.1), we tested:
 - the permission prompt
 - playback and seamless looping
 - the swipe-up picker (tap to add or remove, hold to loop one, All, swipe down to close)
+- the phone remote: PIN and lockout, picking videos, sound, brightness, sleep and wake, uploading and deleting
+- the schedule (sleep, wake, brightness and loop changes firing at their times)
 - double-tap mute
 - fit and fill
 - the hold menu

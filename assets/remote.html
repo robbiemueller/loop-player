@@ -1,0 +1,509 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#12100e">
+<title>Loop Player</title>
+<style>
+  :root {
+    --bg: #12100e; --card: #1c1916; --line: #2e2a25; --ink: #efe7d9; --dim: #a39a8c;
+    --accent: #e39a3b; --accent-ink: #1a1206; --danger: #e05a4a;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--bg); color: var(--ink); }
+  body { font: 16px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; padding-bottom: 40px; }
+  header {
+    position: sticky; top: 0; z-index: 5; display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+    padding: 12px 16px; background: rgba(18, 16, 14, 0.94); border-bottom: 1px solid var(--line);
+  }
+  h1 { font-size: 19px; margin: 0; flex: 1; }
+  h2 { font-size: 16px; margin: 0 0 10px; display: flex; align-items: center; gap: 10px; }
+  h2 .grow { flex: 1; }
+  main { max-width: 720px; margin: 0 auto; padding: 12px 16px; }
+  section { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 14px; margin: 12px 0; }
+  .pill { font-size: 13px; padding: 3px 10px; border-radius: 999px; background: var(--line); color: var(--dim); }
+  .pill.on { background: #2b3a22; color: #b8e09a; }
+  .pill.sleep { background: #24233a; color: #b3b1f0; }
+  .clock { font-size: 13px; color: var(--dim); }
+  .hint { font-size: 13px; color: var(--dim); margin: 6px 0 10px; }
+  button, .button {
+    font: inherit; min-height: 44px; padding: 0 16px; border-radius: 10px; border: 1px solid var(--line);
+    background: #27231f; color: var(--ink); cursor: pointer; display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  }
+  button.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); font-weight: 600; }
+  button.small { min-height: 34px; padding: 0 12px; font-size: 14px; }
+  button.active { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+  button.danger { color: var(--danger); }
+  button:disabled { opacity: 0.45; }
+  .row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+  .row > input[type=range] { flex: 1; min-width: 140px; }
+  input[type=range] { accent-color: var(--accent); height: 32px; }
+  input[type=checkbox] { accent-color: var(--accent); width: 20px; height: 20px; }
+  input[type=time], input[type=text] {
+    font: inherit; color: var(--ink); background: #27231f; border: 1px solid var(--line); border-radius: 10px;
+    min-height: 44px; padding: 0 10px; color-scheme: dark;
+  }
+
+  #now { display: flex; gap: 14px; align-items: center; }
+  #now img { width: 72px; height: 96px; object-fit: cover; border-radius: 8px; background: #000; flex: none; }
+  #now .what { flex: 1; min-width: 0; }
+  #now .label { font-size: 13px; color: var(--dim); }
+  #now .title { font-size: 18px; font-weight: 600; overflow-wrap: anywhere; }
+
+  #grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 10px; }
+  .tile { position: relative; border-radius: 10px; overflow: hidden; background: #000; border: 2px solid transparent; cursor: pointer; }
+  .tile.in { border-color: var(--accent); }
+  .tile img { display: block; width: 100%; aspect-ratio: 3 / 4; object-fit: cover; }
+  .tile.out img { filter: grayscale(1); opacity: 0.45; }
+  .tile .name { position: absolute; left: 0; right: 0; bottom: 0; padding: 18px 8px 6px; font-size: 14px;
+    background: linear-gradient(transparent, rgba(0, 0, 0, 0.85)); overflow-wrap: anywhere; }
+  .tile .badge { position: absolute; left: 6px; top: 6px; min-width: 26px; height: 26px; border-radius: 13px;
+    background: var(--accent); color: var(--accent-ink); font-weight: 700; font-size: 14px; display: grid; place-items: center; padding: 0 6px; }
+  .tile .now { position: absolute; right: 6px; top: 6px; font-size: 12px; font-weight: 700; padding: 3px 7px;
+    border-radius: 6px; background: rgba(0, 0, 0, 0.7); color: var(--accent); }
+  .tile .solo, .tile .del { position: absolute; right: 6px; bottom: 30px; width: 40px; height: 40px; min-height: 0; padding: 0;
+    border-radius: 20px; background: rgba(0, 0, 0, 0.7); border-color: rgba(255, 255, 255, 0.2); }
+  .tile .del { color: var(--danger); top: 6px; bottom: auto; }
+  .upload { position: relative; overflow: hidden; }
+  .upload input { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
+  .bar { height: 6px; border-radius: 3px; background: var(--line); overflow: hidden; margin-top: 8px; }
+  .bar > div { height: 100%; width: 0; background: var(--accent); }
+
+  .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+  .seg button { border: 0; border-radius: 0; min-height: 38px; padding: 0 12px; font-size: 14px; }
+  .seg button + button { border-left: 1px solid var(--line); }
+  .rule { border: 1px solid var(--line); border-radius: 12px; padding: 12px; margin: 10px 0; background: #191613; }
+  .rule .line { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 8px 0; }
+  .rule .line > span:first-child { width: 86px; color: var(--dim); font-size: 14px; }
+  .rule .picks { display: flex; flex-wrap: wrap; gap: 6px 14px; margin: 4px 0 0 96px; font-size: 14px; }
+  .rule .picks label { display: inline-flex; gap: 6px; align-items: center; }
+  .switch { display: inline-flex; align-items: center; gap: 8px; font-size: 14px; font-weight: 400; color: var(--dim); }
+
+  .app { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 6px 0; border-top: 1px solid var(--line); }
+  .app:first-child { border-top: 0; }
+  footer { text-align: center; color: var(--dim); font-size: 13px; }
+
+  #login { position: fixed; inset: 0; z-index: 20; background: var(--bg); display: grid; place-items: center; padding: 24px; }
+  #login form { width: 100%; max-width: 340px; text-align: center; }
+  #login input { width: 100%; font-size: 28px; letter-spacing: 0.3em; text-align: center; margin: 12px 0; }
+  #login button { width: 100%; }
+  #loginErr { color: var(--danger); min-height: 1.4em; }
+  #toast { position: fixed; left: 50%; bottom: 20px; transform: translateX(-50%); z-index: 30; background: #3a332b;
+    color: var(--ink); padding: 10px 16px; border-radius: 10px; font-size: 14px; max-width: 90vw; display: none; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Loop Player</h1>
+  <span id="status" class="pill">…</span>
+  <span id="clock" class="clock"></span>
+</header>
+
+<main>
+  <section id="now">
+    <img id="nowImg" alt="">
+    <div class="what">
+      <div class="label" id="nowLabel">Now playing</div>
+      <div class="title" id="nowTitle">…</div>
+    </div>
+    <button id="sleepBtn">Sleep</button>
+  </section>
+
+  <section>
+    <h2><span class="grow">Videos</span><button id="allBtn" class="small">All</button></h2>
+    <p class="hint">Tap videos to build the loop (the numbers are the order). ▶ loops just that one. All plays everything.</p>
+    <div id="grid"></div>
+    <div class="row" style="margin-top: 12px">
+      <label class="button upload" id="uploadLabel">+ Add videos<input type="file" id="file" multiple
+        accept="video/mp4,video/webm,video/x-matroska,.mp4,.mkv,.webm"></label>
+      <button id="editBtn">Delete…</button>
+    </div>
+    <p class="hint" id="noWrite" hidden>To add or delete videos from here, allow Loop Player to save files on the device
+      (Android settings → Apps → Loop Player → Permissions → Storage).</p>
+    <div id="upload" hidden><div class="hint" id="uploadText"></div><div class="bar"><div id="uploadBar"></div></div></div>
+  </section>
+
+  <section>
+    <h2>Sound</h2>
+    <div class="row">
+      <button id="muteBtn">Sound on</button>
+      <input type="range" id="volume" min="0" max="15" step="1" aria-label="Volume">
+    </div>
+  </section>
+
+  <section>
+    <h2>Screen</h2>
+    <div class="row">
+      <span>Brightness</span>
+      <input type="range" id="bright" min="1" max="100" step="1" aria-label="Brightness">
+      <label class="switch"><input type="checkbox" id="autoBright"> Auto</label>
+    </div>
+    <div class="row" style="margin-top: 10px">
+      <span>Picture</span>
+      <div class="seg"><button id="fitBtn">Fit</button><button id="fillBtn">Fill</button></div>
+    </div>
+  </section>
+
+  <section>
+    <h2><span class="grow">Schedule</span><label class="switch"><input type="checkbox" id="schedOn"> On</label></h2>
+    <p class="hint">Each time takes effect once a day, by the sign's clock (<span id="clock2"></span>). Anything you change
+      by hand stays until the next time. The schedule runs while Loop Player is open on the sign.</p>
+    <div id="rules"></div>
+    <div class="row">
+      <button id="addRule">+ Add a time</button>
+      <button id="saveSched" class="primary" disabled>Save schedule</button>
+    </div>
+  </section>
+
+  <section>
+    <h2>Apps on the sign</h2>
+    <div id="apps"></div>
+  </section>
+</main>
+<footer>Loop Player <span id="version"></span></footer>
+
+<div id="login" hidden>
+  <form id="loginForm">
+    <h2 style="justify-content: center">Loop Player</h2>
+    <p class="hint">Enter the PIN shown on the screen. To see it again, hold a finger on the screen for 3 seconds.</p>
+    <input type="text" id="pin" inputmode="numeric" autocomplete="one-time-code" maxlength="6" pattern="[0-9]*">
+    <button class="primary">Connect</button>
+    <p id="loginErr"></p>
+  </form>
+</div>
+<div id="toast"></div>
+
+<script>
+"use strict";
+const $ = (s) => document.querySelector(s);
+const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+const thumb = (v) => "/api/thumb?name=" + encodeURIComponent(v.name) + "&v=" + v.size + "-" + v.modified;
+
+let state = null;       // the last answer from the sign
+let draft = null;       // the schedule being edited
+let draftDirty = false;
+let editing = false;    // delete mode
+let loggedOut = false;
+let dragging = false;   // a slider is being moved: don't overwrite it
+let pollTimer = 0;
+
+async function api(method, path, body) {
+  const opts = { method, headers: {}, credentials: "same-origin" };
+  if (method !== "GET") opts.headers["X-Remote"] = "1";
+  if (body !== undefined) {
+    opts.headers["Content-Type"] = "application/json";
+    opts.body = JSON.stringify(body);
+  }
+  const r = await fetch("/api/" + path, opts);
+  let data = {};
+  try { data = await r.json(); } catch (e) { /* empty answer */ }
+  if (r.status === 401) { showLogin(data.error); throw new Error(data.error || "PIN needed"); }
+  if (!r.ok) throw new Error(data.error || "The sign answered " + r.status);
+  return data;
+}
+
+async function act(path, body) {
+  try { render(await api("POST", path, body)); } catch (e) { toast(e.message); }
+}
+
+async function refresh() {
+  try { render(await api("GET", "state")); } catch (e) { if (!loggedOut) toast("Can't reach the sign"); }
+}
+
+function poll() {
+  clearTimeout(pollTimer);
+  pollTimer = setTimeout(async () => {
+    if (!document.hidden && !loggedOut) await refresh();
+    poll();
+  }, 4000);
+}
+document.addEventListener("visibilitychange", () => { if (!document.hidden && !loggedOut) refresh(); });
+
+function toast(text) {
+  const t = $("#toast");
+  t.textContent = text;
+  t.style.display = "block";
+  clearTimeout(toast.timer);
+  toast.timer = setTimeout(() => (t.style.display = "none"), 3000);
+}
+
+// ---- PIN ----
+
+function showLogin(message) {
+  loggedOut = true;
+  $("#login").hidden = false;
+  $("#loginErr").textContent = message && message !== "PIN needed" ? message : "";
+  $("#pin").focus();
+}
+
+$("#loginForm").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  try {
+    await api("POST", "login", { pin: $("#pin").value.trim() });
+    loggedOut = false;
+    $("#login").hidden = true;
+    $("#pin").value = "";
+    await refresh();
+  } catch (err) {
+    $("#loginErr").textContent = err.message;
+  }
+});
+
+// ---- Rendering ----
+
+function inLoop(name) {
+  return state.all || state.selection.includes(name);
+}
+
+function render(s) {
+  state = s;
+  const playing = s.videos.find((v) => v.name === s.playing);
+  const status = $("#status");
+  status.className = "pill " + (s.asleep ? "sleep" : s.inFront && playing ? "on" : "");
+  status.textContent = s.asleep ? "Asleep" : !s.inFront ? "Another app is on screen" : playing ? "Playing" : "No videos";
+  $("#clock").textContent = "Sign's clock " + s.clock;
+  $("#clock2").textContent = s.clock;
+  $("#version").textContent = s.version;
+
+  $("#nowLabel").textContent = s.asleep ? "Asleep, paused on" : "Now playing";
+  $("#nowTitle").textContent = playing ? playing.title : "Nothing";
+  if (playing) $("#nowImg").src = thumb(playing);
+  $("#nowImg").hidden = !playing;
+  $("#sleepBtn").textContent = s.asleep ? "Wake" : "Sleep";
+  $("#sleepBtn").className = s.asleep ? "primary" : "";
+
+  $("#allBtn").className = "small" + (s.all ? " active" : "");
+  renderGrid();
+
+  $("#muteBtn").textContent = s.muted ? "Sound off" : "Sound on";
+  $("#muteBtn").className = s.muted ? "" : "active";
+  if (!dragging) {
+    $("#volume").max = s.maxVolume;
+    $("#volume").value = s.volume;
+    $("#autoBright").checked = s.brightness < 0;
+    $("#bright").disabled = s.brightness < 0;
+    if (s.brightness > 0) $("#bright").value = s.brightness;
+  }
+  $("#fitBtn").className = s.fill ? "" : "active";
+  $("#fillBtn").className = s.fill ? "active" : "";
+
+  if (!draftDirty) {
+    draft = JSON.parse(JSON.stringify(s.schedule));
+    renderRules();
+  }
+  renderApps();
+  $("#uploadLabel").hidden = !s.canWrite;
+  $("#editBtn").hidden = !s.canWrite;
+  $("#noWrite").hidden = s.canWrite;
+}
+
+function renderGrid() {
+  const s = state;
+  $("#grid").innerHTML = s.videos.map((v) => {
+    const order = s.all ? -1 : s.selection.indexOf(v.name);
+    const cls = "tile " + (inLoop(v.name) ? (s.all ? "" : "in") : "out");
+    return `<div class="${cls}" data-name="${esc(v.name)}">
+      <img loading="lazy" src="${esc(thumb(v))}" alt="">
+      ${order >= 0 ? `<span class="badge">${order + 1}</span>` : ""}
+      ${v.name === s.playing ? `<span class="now">▶ NOW</span>` : ""}
+      ${editing ? `<button class="del" data-del="${esc(v.name)}" aria-label="Delete">✕</button>`
+                : `<button class="solo" data-solo="${esc(v.name)}" aria-label="Loop only this">▶</button>`}
+      <div class="name">${esc(v.title)}</div>
+    </div>`;
+  }).join("") || `<p class="hint">No videos yet. Add some below.</p>`;
+}
+
+$("#grid").addEventListener("click", async (e) => {
+  const del = e.target.closest("[data-del]");
+  const solo = e.target.closest("[data-solo]");
+  const tile = e.target.closest(".tile");
+  if (del) {
+    const name = del.dataset.del;
+    if (!confirm("Delete " + name + " from the sign?")) return;
+    try { render(await api("DELETE", "video?name=" + encodeURIComponent(name))); } catch (err) { toast(err.message); }
+  } else if (solo) {
+    act("loop", { solo: solo.dataset.solo });
+  } else if (tile && !editing) {
+    // Same rules as the swipe-up panel: from All, a tap starts a loop of just that one; the last one out means All.
+    const name = tile.dataset.name;
+    let names = state.all ? [] : state.selection.slice();
+    if (state.all) names = [name];
+    else if (names.includes(name)) names = names.filter((n) => n !== name);
+    else names.push(name);
+    act("loop", names.length ? { names } : { all: true });
+  }
+});
+
+$("#allBtn").onclick = () => act("loop", { all: true });
+$("#editBtn").onclick = () => {
+  editing = !editing;
+  $("#editBtn").textContent = editing ? "Done" : "Delete…";
+  $("#editBtn").className = editing ? "active" : "";
+  renderGrid();
+};
+$("#sleepBtn").onclick = () => act("screen", { asleep: !state.asleep });
+$("#muteBtn").onclick = () => act("sound", { muted: !state.muted });
+$("#fitBtn").onclick = () => act("screen", { fill: false });
+$("#fillBtn").onclick = () => act("screen", { fill: true });
+
+for (const id of ["#volume", "#bright"]) {
+  const el = $(id);
+  el.addEventListener("pointerdown", () => (dragging = true));
+  el.addEventListener("pointerup", () => (dragging = false));
+  el.addEventListener("pointercancel", () => (dragging = false));
+}
+$("#volume").addEventListener("change", (e) => { dragging = false; act("sound", { volume: +e.target.value }); });
+$("#bright").addEventListener("input", (e) => { clearTimeout(window.brightTimer); window.brightTimer = setTimeout(() => act("screen", { brightness: +e.target.value }), 120); });
+$("#bright").addEventListener("change", () => (dragging = false));
+$("#autoBright").addEventListener("change", (e) => act("screen", { brightness: e.target.checked ? -1 : +$("#bright").value }));
+
+// ---- Uploads ----
+
+$("#file").addEventListener("change", async (e) => {
+  const files = [...e.target.files];
+  e.target.value = "";
+  for (const f of files) {
+    if (!/\.(mp4|mkv|webm)$/i.test(f.name)) { toast(f.name + ": only .mp4, .mkv and .webm"); continue; }
+    if (state && f.size > state.freeBytes - 32 * 1024 * 1024) { toast(f.name + ": not enough space on the sign"); continue; }
+    if (state && state.videos.some((v) => v.name === f.name) && !confirm("Replace " + f.name + " on the sign?")) continue;
+    try { render(await upload(f)); toast("Added " + f.name); } catch (err) { toast(f.name + ": " + err.message); }
+  }
+  $("#upload").hidden = true;
+});
+
+function upload(file) {
+  return new Promise((resolve, reject) => {
+    $("#upload").hidden = false;
+    $("#uploadText").textContent = "Sending " + file.name + "…";
+    $("#uploadBar").style.width = "0";
+    const xhr = new XMLHttpRequest();
+    xhr.open("PUT", "/api/video?name=" + encodeURIComponent(file.name));
+    xhr.setRequestHeader("X-Remote", "1");
+    xhr.upload.onprogress = (e) => {
+      if (!e.lengthComputable) return;
+      $("#uploadBar").style.width = (100 * e.loaded / e.total).toFixed(1) + "%";
+      $("#uploadText").textContent = `Sending ${file.name}: ${(e.loaded / 1048576).toFixed(1)} of ${(e.total / 1048576).toFixed(1)} MB`;
+    };
+    xhr.onload = () => {
+      let data = {};
+      try { data = JSON.parse(xhr.responseText); } catch (e) { /* empty */ }
+      if (xhr.status === 401) { showLogin(); reject(new Error("PIN needed")); }
+      else if (xhr.status !== 200) reject(new Error(data.error || "The sign answered " + xhr.status));
+      else resolve(data);
+    };
+    xhr.onerror = () => reject(new Error("the upload was cut off"));
+    xhr.send(file);
+  });
+}
+
+// ---- Schedule ----
+
+const SEG = {
+  screen: [["keep", "Keep"], ["on", "On"], ["off", "Off"]],
+  sound: [["keep", "Keep"], ["on", "On"], ["off", "Off"]],
+  loop: [["keep", "Keep"], ["all", "All"], ["pick", "Pick"]],
+};
+
+function seg(i, key, value) {
+  return `<div class="seg">${SEG[key].map(([v, label]) =>
+    `<button data-rule="${i}" data-key="${key}" data-value="${v}" class="${v === value ? "active" : ""}">${label}</button>`).join("")}</div>`;
+}
+
+function renderRules() {
+  $("#schedOn").checked = draft.enabled;
+  $("#rules").innerHTML = draft.rules.map((r, i) => {
+    const bMode = r.brightness === -2 ? "keep" : r.brightness === -1 ? "auto" : "set";
+    const videos = state ? state.videos : [];
+    return `<div class="rule">
+      <div class="line">
+        <input type="time" value="${esc(r.time)}" data-rule="${i}" data-key="time" required>
+        <span style="flex: 1"></span>
+        <button class="small danger" data-remove="${i}">Remove</button>
+      </div>
+      <div class="line"><span>Screen</span>${seg(i, "screen", r.screen)}</div>
+      <div class="line"><span>Sound</span>${seg(i, "sound", r.sound)}</div>
+      <div class="line"><span>Brightness</span>
+        <div class="seg">${[["keep", "Keep"], ["auto", "Auto"], ["set", "Set"]].map(([v, label]) =>
+          `<button data-rule="${i}" data-key="bmode" data-value="${v}" class="${v === bMode ? "active" : ""}">${label}</button>`).join("")}</div>
+        ${bMode === "set" ? `<input type="range" min="1" max="100" value="${r.brightness}" data-rule="${i}" data-key="brightness"> <span>${r.brightness}%</span>` : ""}
+      </div>
+      <div class="line"><span>Loop</span>${seg(i, "loop", r.loop)}</div>
+      ${r.loop === "pick" ? `<div class="picks">${videos.map((v) =>
+        `<label><input type="checkbox" data-rule="${i}" data-pick="${esc(v.name)}" ${r.names.includes(v.name) ? "checked" : ""}> ${esc(v.title)}</label>`).join("")}</div>` : ""}
+    </div>`;
+  }).join("") || `<p class="hint">No times yet.</p>`;
+  $("#saveSched").disabled = !draftDirty;
+}
+
+function changed() {
+  draftDirty = true;
+  renderRules();
+}
+
+$("#rules").addEventListener("click", (e) => {
+  const b = e.target.closest("button");
+  if (!b) return;
+  if (b.dataset.remove !== undefined) {
+    draft.rules.splice(+b.dataset.remove, 1);
+    return changed();
+  }
+  const r = draft.rules[+b.dataset.rule];
+  if (!r) return;
+  if (b.dataset.key === "bmode") r.brightness = { keep: -2, auto: -1, set: r.brightness > 0 ? r.brightness : 70 }[b.dataset.value];
+  else r[b.dataset.key] = b.dataset.value;
+  if (r.loop === "pick" && !r.names.length && state) r.names = state.selection.length ? state.selection.slice() : [];
+  changed();
+});
+
+$("#rules").addEventListener("change", (e) => {
+  const t = e.target;
+  const r = draft.rules[+t.dataset.rule];
+  if (!r) return;
+  if (t.dataset.key === "time") r.time = t.value || r.time;
+  else if (t.dataset.key === "brightness") r.brightness = +t.value;
+  else if (t.dataset.pick !== undefined) {
+    r.names = r.names.filter((n) => n !== t.dataset.pick);
+    if (t.checked) r.names.push(t.dataset.pick);
+  }
+  changed();
+});
+
+$("#schedOn").addEventListener("change", (e) => { draft.enabled = e.target.checked; changed(); });
+$("#addRule").onclick = () => {
+  draft.rules.push({ time: "22:00", screen: "off", sound: "keep", brightness: -2, loop: "keep", names: [] });
+  if (!draft.enabled && draft.rules.length === 1) draft.enabled = true;
+  changed();
+};
+$("#saveSched").onclick = async () => {
+  try {
+    const s = await api("POST", "schedule", draft);
+    draftDirty = false;
+    render(s);
+    toast("Schedule saved");
+  } catch (err) {
+    toast(err.message);
+  }
+};
+
+// ---- Apps ----
+
+function renderApps() {
+  const s = state;
+  const rows = [];
+  if (!s.inFront) rows.push(`<div class="app"><span>Loop Player</span><button class="small primary" data-open="self">Bring back</button></div>`);
+  for (const a of s.apps) rows.push(`<div class="app"><span>${esc(a.label)}</span><button class="small" data-open="${esc(a.package)}">Open</button></div>`);
+  $("#apps").innerHTML = rows.join("");
+}
+
+$("#apps").addEventListener("click", (e) => {
+  const b = e.target.closest("[data-open]");
+  if (!b) return;
+  act("open", { package: b.dataset.open === "self" ? "io.github.robbiemueller.loopplayer" : b.dataset.open });
+});
+
+refresh().then(poll);
+</script>
+</body>
+</html>

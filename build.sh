@@ -6,8 +6,8 @@
 #   ./build.sh --install     build, install over ADB and start it
 #   KEYSTORE=my.keystore STOREPASS=secret ./build.sh
 set -euo pipefail
-VERSION_CODE=3
-VERSION_NAME=1.2.0
+VERSION_CODE=4
+VERSION_NAME=1.3.0
 TARGET_SDK=35
 
 SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
@@ -25,7 +25,7 @@ mkdir -p "$OUT/classes" "$OUT/dex"
 javac -source 8 -target 8 -Xlint:-options -encoding UTF-8 -bootclasspath "$JAR" -d "$OUT/classes" \
   $(find "$HERE/src" -name '*.java')
 "$BT/d8" --release --min-api 21 --lib "$JAR" --output "$OUT/dex" $(find "$OUT/classes" -name '*.class')
-"$BT/aapt2" link -o "$OUT/base.apk" -I "$JAR" --manifest "$HERE/AndroidManifest.xml" \
+"$BT/aapt2" link -o "$OUT/base.apk" -I "$JAR" --manifest "$HERE/AndroidManifest.xml" -A "$HERE/assets" \
   --min-sdk-version 21 --target-sdk-version "$TARGET_SDK" --version-code "$VERSION_CODE" --version-name "$VERSION_NAME"
 (cd "$OUT/dex" && jar uf "$OUT/base.apk" classes.dex)
 "$BT/zipalign" -f -p 4 "$OUT/base.apk" "$OUT/aligned.apk"

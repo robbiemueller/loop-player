@@ -7,6 +7,7 @@ import android.content.DialogInterface;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
+import android.content.pm.ResolveInfo;
 import android.graphics.Color;
 import android.media.AudioManager;
 import android.media.MediaPlayer;
@@ -26,18 +27,36 @@ import android.view.WindowManager;
 import android.widget.FrameLayout;
 import android.widget.TextView;
 
+import org.json.JSONArray;
+import org.json.JSONObject;
+
+import java.io.ByteArrayOutputStream;
 import java.io.File;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.net.Inet4Address;
+import java.net.InetAddress;
+import java.net.NetworkInterface;
+import java.security.SecureRandom;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Calendar;
+import java.util.Collections;
 import java.util.List;
 import java.util.Locale;
+import java.util.concurrent.Callable;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.FutureTask;
+import java.util.concurrent.TimeUnit;
 
 /**
  * Full-screen, control-free video loop for signage screens, old tablets and the like (Android 5.0+).
  *
  * Plays the videos in /sdcard/Movies/loop/ forever: all of them in name order, or the ones picked in the swipe-up
  * panel, in the order picked (a single video loops seamlessly inside the media player). Double-tap toggles the sound;
- * holding a finger down for 3 seconds opens the settings menu.
+ * holding a finger down for 3 seconds opens the settings menu, where the phone remote can be turned on.
  * From a computer: adb shell am start -n io.github.robbiemueller.loopplayer/.PlayerActivity with
  *   --ez reload true           rescan the folder
  *   --es play name.mp4         loop just that video
@@ -46,11 +65,17 @@ import java.util.Locale;
  *   --ez mute true             sound off (false: on)
  *   --ez fill true             crop to fill the screen (false: fit the whole video)
  *   --ez home true             use as the home screen (false: stop)
+ *   --ez remote true           phone remote on (false: off)
+ *   --ez sleep true            screen dark and playback paused (false: wake)
  */
 public class PlayerActivity extends Activity implements VideoPicker.Listener {
     private static final long MENU_HOLD_MS = 3000;
     private static final int PERMISSION_REQUEST = 1;
+    private static final int WRITE_REQUEST = 2;
     private static final int HINT_LAUNCHES = 5;
+    private static final int REMOTE_PORT = 8080;
+    private static final long FREE_SPACE_MARGIN = 32L * 1024 * 1024;
+    private static final String WRITE_STORAGE = "android.permission.WRITE_EXTERNAL_STORAGE";
     // View.SYSTEM_UI_FLAG_* values, written out so this builds against any SDK level.
     private static final int IMMERSIVE = 0x00000100 | 0x00000200 | 0x00000400 | 0x00000002 | 0x00000004 | 0x00001000;
 
@@ -58,7 +83,12 @@ public class PlayerActivity extends Activity implements VideoPicker.Listener {
     private LoopVideoView video;
     private TextView notice;
     private VideoPicker picker;
+    private View sleepCover;
     private MediaPlayer player;
+    private Thumbnails thumbnails;
+    private AudioManager audio;
+    private RemoteServer remote;
+    private Schedule schedule;
     private List<File> library = new ArrayList<>();
     private List<File> playlist = new ArrayList<>();
     private File current;
@@ -66,6 +96,9 @@ public class PlayerActivity extends Activity implements VideoPicker.Listener {
     private List<String> selection = new ArrayList<>();
     private boolean muted;
     private boolean fill;
+    private boolean asleep;
+    private boolean inFront;
+    private int brightness;
     private SharedPreferences prefs;
     private float downX, downY;
 
@@ -81,18 +114,31 @@ public class PlayerActivity extends Activity implements VideoPicker.Listener {
             notice.setVisibility(View.GONE);
         }
     };
+    /** Checks the schedule at the start of every minute. */
+    private final Runnable scheduleTick = new Runnable() {
+        @Override
+        public void run() {
+            checkSchedule();
+            handler.postDelayed(this, 60000 - System.currentTimeMillis() % 60000 + 500);
+        }
+    };
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         setVolumeControlStream(AudioManager.STREAM_MUSIC);
+        audio = (AudioManager) getSystemService(AUDIO_SERVICE);
         prefs = getSharedPreferences("player", MODE_PRIVATE);
         muted = prefs.getBoolean("muted", false);
         fill = prefs.getBoolean("fill", false);
         allMode = prefs.getBoolean("all", true);
+        asleep = prefs.getBoolean("asleep", false);
+        brightness = prefs.getInt("brightness", Schedule.AUTO_BRIGHTNESS);
+        schedule = Schedule.load(prefs.getString("schedule", ""));
         String saved = prefs.getString("selection", "");
         if (!saved.isEmpty()) selection = new ArrayList<>(Arrays.asList(saved.split("\n")));
+        thumbnails = new Thumbnails(new File(getCacheDir(), "thumbs"));
 
         FrameLayout root = new FrameLayout(this);
         root.setBackgroundColor(Color.BLACK);
@@ -100,6 +146,21 @@ public class PlayerActivity extends Activity implements VideoPicker.Listener {
         video.setFill(fill);
         root.addView(video, new FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT, Gravity.CENTER));
+        picker = new VideoPicker(this, this, thumbnails);
+        root.addView(picker, new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
+        // Asleep: a black cover over everything; a tap on it wakes the screen until the schedule says otherwise.
+        sleepCover = new View(this);
+        sleepCover.setBackgroundColor(Color.BLACK);
+        sleepCover.setVisibility(View.GONE);
+        sleepCover.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                setAsleep(false);
+            }
+        });
+        root.addView(sleepCover, new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
         notice = new TextView(this);
         notice.setTextColor(Color.WHITE);
         notice.setBackgroundColor(Color.argb(0xc0, 0, 0, 0));
@@ -109,9 +170,6 @@ public class PlayerActivity extends Activity implements VideoPicker.Listener {
         notice.setVisibility(View.GONE);
         root.addView(notice, new FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.CENTER));
-        picker = new VideoPicker(this, this);
-        root.addView(picker, new FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
         setContentView(root);
 
         final float density = getResources().getDisplayMetrics().density;
@@ -166,7 +224,7 @@ public class PlayerActivity extends Activity implements VideoPicker.Listener {
                 updateLooping();
                 video.setVideoDimensions(mp.getVideoWidth(), mp.getVideoHeight());
                 applyVolume();
-                video.start();
+                if (!asleep) video.start();
             }
         });
         video.setOnCompletionListener(new MediaPlayer.OnCompletionListener() {
@@ -189,17 +247,28 @@ public class PlayerActivity extends Activity implements VideoPicker.Listener {
             }
         });
 
+        if (asleep) sleepCover.setVisibility(View.VISIBLE);
+        applyBrightness();
         boolean restart = handleIntent(getIntent());
         if (hasVideoPermission()) {
             startPlaylist();
             int launches = prefs.getInt("launches", 0);
-            if (launches < HINT_LAUNCHES && !restart) {
+            if (launches < HINT_LAUNCHES && !restart && !asleep) {
                 prefs.edit().putInt("launches", launches + 1).apply();
                 showNotice("Swipe up to choose videos", 2500);
             }
         } else {
             requestPermissions(new String[] {videoPermission()}, PERMISSION_REQUEST);
         }
+        if (prefs.getBoolean("remote", false)) startRemote(false);
+        handler.post(scheduleTick);
+    }
+
+    @Override
+    protected void onDestroy() {
+        super.onDestroy();
+        handler.removeCallbacks(scheduleTick);
+        stopRemote();
     }
 
     @Override
@@ -216,6 +285,8 @@ public class PlayerActivity extends Activity implements VideoPicker.Listener {
         if (intent.hasExtra("mute")) setMuted(intent.getBooleanExtra("mute", false));
         if (intent.hasExtra("fill")) setFill(intent.getBooleanExtra("fill", false));
         if (intent.hasExtra("home")) setHome(intent.getBooleanExtra("home", false));
+        if (intent.hasExtra("remote")) setRemote(intent.getBooleanExtra("remote", false));
+        if (intent.hasExtra("sleep")) setAsleep(intent.getBooleanExtra("sleep", false));
         if (intent.getBooleanExtra("all", false)) {
             saveSelection(new ArrayList<String>(), true);
             restart = true;
@@ -246,13 +317,15 @@ public class PlayerActivity extends Activity implements VideoPicker.Listener {
     @Override
     protected void onResume() {
         super.onResume();
+        inFront = true;
         hideSystemUi();
-        if (!video.isPlaying() && !playlist.isEmpty()) video.start();
+        if (!asleep && !video.isPlaying() && !playlist.isEmpty()) video.start();
     }
 
     @Override
     protected void onPause() {
         super.onPause();
+        inFront = false;
         handler.removeCallbacks(openMenuAfterHold);
     }
 
@@ -286,6 +359,12 @@ public class PlayerActivity extends Activity implements VideoPicker.Listener {
                 || checkSelfPermission(videoPermission()) == PackageManager.PERMISSION_GRANTED;
     }
 
+    /** Android 6 to 10 need the storage write permission for uploads and deletes from the phone remote. */
+    private boolean needsWritePermission() {
+        return Build.VERSION.SDK_INT >= 23 && Build.VERSION.SDK_INT <= 29
+                && checkSelfPermission(WRITE_STORAGE) != PackageManager.PERMISSION_GRANTED;
+    }
+
     // ---- The library and the loop ----
 
     private File folder() {
@@ -298,11 +377,13 @@ public class PlayerActivity extends Activity implements VideoPicker.Listener {
         if (files == null) return;
         Arrays.sort(files);
         for (File f : files) {
-            String name = f.getName().toLowerCase(Locale.US);
-            if (f.isFile() && (name.endsWith(".mp4") || name.endsWith(".mkv") || name.endsWith(".webm"))) {
-                library.add(f);
-            }
+            if (f.isFile() && isVideoName(f.getName())) library.add(f);
         }
+    }
+
+    private static boolean isVideoName(String name) {
+        String n = name.toLowerCase(Locale.US);
+        return !n.startsWith(".") && (n.endsWith(".mp4") || n.endsWith(".mkv") || n.endsWith(".webm"));
     }
 
     /** The loop: every video when in "all" mode (or when none of the picked ones exist), else the picked ones. */
@@ -361,15 +442,19 @@ public class PlayerActivity extends Activity implements VideoPicker.Listener {
     private void openPicker() {
         handler.removeCallbacks(openMenuAfterHold);
         scanLibrary();
-        // Only picks that still exist on disk; none left means everything plays.
+        picker.setLibrary(library, effectiveSelection(), allMode || effectiveSelection().isEmpty(),
+                current == null ? null : current.getName());
+        picker.open();
+    }
+
+    /** The picks that still exist on disk, in order; none left means everything plays. */
+    private List<String> effectiveSelection() {
         List<String> existing = new ArrayList<>();
+        if (allMode) return existing;
         for (File f : buildPlaylist()) {
             if (selection.contains(f.getName())) existing.add(f.getName());
         }
-        boolean all = allMode || existing.isEmpty();
-        picker.setLibrary(library, all ? new ArrayList<String>() : existing, all,
-                current == null ? null : current.getName());
-        picker.open();
+        return existing;
     }
 
     @Override
@@ -395,7 +480,7 @@ public class PlayerActivity extends Activity implements VideoPicker.Listener {
         } else {
             play(playlist.get(0));
         }
-        showNotice("Looping " + VideoPicker.displayName(name));
+        if (!asleep) showNotice("Looping " + VideoPicker.displayName(name));
     }
 
     @Override
@@ -403,14 +488,380 @@ public class PlayerActivity extends Activity implements VideoPicker.Listener {
         hideSystemUi();
     }
 
+    /** After files were added or removed: rescan, and move on if what's on screen is gone. */
+    private void libraryChanged() {
+        scanLibrary();
+        playlist = buildPlaylist();
+        if (playlist.isEmpty()) {
+            startPlaylist();
+        } else if (current == null || !playlist.contains(current)) {
+            play(playlist.get(0));
+        } else {
+            updateLooping();
+        }
+        if (picker.isOpen()) openPicker();
+    }
+
+    // ---- Sleep, brightness and the schedule ----
+
+    /** Asleep: the screen goes black at its lowest backlight and playback pauses. A tap, the remote or the schedule
+     *  wakes it. */
+    private void setAsleep(boolean value) {
+        if (value == asleep) return;
+        asleep = value;
+        prefs.edit().putBoolean("asleep", asleep).apply();
+        if (asleep) {
+            if (picker.isOpen()) picker.close();
+            notice.setVisibility(View.GONE);
+            sleepCover.setVisibility(View.VISIBLE);
+            video.pause();
+        } else {
+            sleepCover.setVisibility(View.GONE);
+            if (current == null || !playlist.contains(current)) startPlaylist();
+            else video.start();
+        }
+        applyBrightness();
+    }
+
+    /** Percent 1..100, or Schedule.AUTO_BRIGHTNESS for the system setting. */
+    private void setBrightness(int value) {
+        brightness = value == Schedule.AUTO_BRIGHTNESS ? value : Math.max(1, Math.min(100, value));
+        prefs.edit().putInt("brightness", brightness).apply();
+        applyBrightness();
+    }
+
+    private void applyBrightness() {
+        WindowManager.LayoutParams lp = getWindow().getAttributes();
+        lp.screenBrightness = asleep ? 0f : brightness < 0 ? -1f : brightness / 100f;
+        getWindow().setAttributes(lp);
+    }
+
+    private void setSchedule(Schedule value) {
+        schedule = value;
+        try {
+            prefs.edit().putString("schedule", value.toJson().toString()).apply();
+        } catch (Exception ignored) {
+            // toJson only fails on a broken rule, which parse() already rejected.
+        }
+        // A new schedule takes effect from its next time on, not by jumping to whatever it says right now.
+        markScheduleDone();
+    }
+
+    /** Applies the rule in force now, once: each rule fires on the day it comes round, then leaves things alone. */
+    private void checkSchedule() {
+        String key = scheduleKey();
+        if (key == null || key.equals(prefs.getString("schedule_done", ""))) return;
+        prefs.edit().putString("schedule_done", key).apply();
+        applyRule(schedule.activeAt(minuteOfDay(Calendar.getInstance())));
+    }
+
+    private void markScheduleDone() {
+        String key = scheduleKey();
+        prefs.edit().putString("schedule_done", key == null ? "" : key).apply();
+    }
+
+    /** Identifies the latest firing of the rule in force now: its date, time and contents. */
+    private String scheduleKey() {
+        if (!schedule.enabled || schedule.rules.isEmpty()) return null;
+        Calendar now = Calendar.getInstance();
+        Schedule.Rule rule = schedule.activeAt(minuteOfDay(now));
+        if (rule.minute > minuteOfDay(now)) now.add(Calendar.DAY_OF_YEAR, -1);  // it last fired yesterday
+        try {
+            return now.get(Calendar.YEAR) + "-" + now.get(Calendar.DAY_OF_YEAR) + " " + rule.toJson();
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private static int minuteOfDay(Calendar c) {
+        return c.get(Calendar.HOUR_OF_DAY) * 60 + c.get(Calendar.MINUTE);
+    }
+
+    private void applyRule(Schedule.Rule rule) {
+        if (rule.loop.equals("all")) {
+            onSelectionChanged(new ArrayList<String>(), true);
+        } else if (rule.loop.equals("pick")) {
+            onSelectionChanged(new ArrayList<>(rule.names), false);
+        }
+        if (!rule.sound.equals("keep")) setMuted(rule.sound.equals("off"));
+        if (rule.brightness != Schedule.KEEP_BRIGHTNESS) setBrightness(rule.brightness);
+        if (!rule.screen.equals("keep")) setAsleep(rule.screen.equals("off"));
+    }
+
+    // ---- Phone remote ----
+
+    private void setRemote(boolean on) {
+        prefs.edit().putBoolean("remote", on).apply();
+        if (on) {
+            startRemote(true);
+            if (needsWritePermission()) requestPermissions(new String[] {WRITE_STORAGE}, WRITE_REQUEST);
+        } else {
+            stopRemote();
+            showNotice("Phone remote: off");
+        }
+    }
+
+    private void startRemote(boolean announce) {
+        if (remote != null) {
+            if (announce) showNotice(remoteAddress() + "\nPIN " + remotePin(), 15000);
+            return;
+        }
+        remote = new RemoteServer(REMOTE_PORT, remotePin(), new RemoteApi());
+        try {
+            remote.start();
+        } catch (IOException e) {
+            remote = null;
+            showNotice("The phone remote couldn't start:\n" + e.getMessage(), 5000);
+            return;
+        }
+        if (announce) showNotice("Phone remote on\n" + remoteAddress() + "\nPIN " + remotePin(), 15000);
+    }
+
+    private void stopRemote() {
+        if (remote != null) remote.stop();
+        remote = null;
+    }
+
+    /** Six random digits, made once and kept. */
+    private String remotePin() {
+        String pin = prefs.getString("remote_pin", null);
+        if (pin == null) {
+            pin = String.format(Locale.US, "%06d", new SecureRandom().nextInt(1000000));
+            prefs.edit().putString("remote_pin", pin).apply();
+        }
+        return pin;
+    }
+
+    private static String remoteAddress() {
+        try {
+            for (NetworkInterface ni : Collections.list(NetworkInterface.getNetworkInterfaces())) {
+                if (!ni.isUp() || ni.isLoopback()) continue;
+                for (InetAddress a : Collections.list(ni.getInetAddresses())) {
+                    if (a instanceof Inet4Address && a.isSiteLocalAddress()) {
+                        return "http://" + a.getHostAddress() + ":" + REMOTE_PORT;
+                    }
+                }
+            }
+        } catch (Exception ignored) {
+            // No network yet.
+        }
+        return "http://<this device's address>:" + REMOTE_PORT;
+    }
+
+    /** Runs on the main thread and waits for the answer; the remote's calls come in on its own threads. */
+    private <T> T onMain(Callable<T> work) throws Exception {
+        FutureTask<T> task = new FutureTask<>(work);
+        handler.post(task);
+        try {
+            return task.get(10, TimeUnit.SECONDS);
+        } catch (ExecutionException e) {
+            // Hand back the real error (a bad name, an unknown action) rather than its wrapper.
+            if (e.getCause() instanceof Exception) throw (Exception) e.getCause();
+            throw e;
+        }
+    }
+
+    private File videoFile(String name) {
+        if (name == null || name.length() > 150 || name.contains("/") || name.contains("\\") || name.contains("\0")
+                || !isVideoName(name)) {
+            throw new IllegalArgumentException("Video names must end in .mp4, .mkv or .webm and can't contain slashes");
+        }
+        return new File(folder(), name);
+    }
+
+    private class RemoteApi implements RemoteServer.Api {
+        @Override
+        public byte[] page() throws IOException {
+            InputStream in = getAssets().open("remote.html");
+            try {
+                ByteArrayOutputStream out = new ByteArrayOutputStream();
+                byte[] buf = new byte[8192];
+                int n;
+                while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
+                return out.toByteArray();
+            } finally {
+                in.close();
+            }
+        }
+
+        @Override
+        public JSONObject state() throws Exception {
+            return onMain(new Callable<JSONObject>() {
+                @Override
+                public JSONObject call() throws Exception {
+                    scanLibrary();
+                    JSONArray videos = new JSONArray();
+                    for (File f : library) {
+                        videos.put(new JSONObject().put("name", f.getName()).put("title", VideoPicker.displayName(f.getName()))
+                                .put("size", f.length()).put("modified", f.lastModified()));
+                    }
+                    JSONArray apps = new JSONArray();
+                    Intent launcher = new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER);
+                    for (ResolveInfo r : getPackageManager().queryIntentActivities(launcher, 0)) {
+                        if (r.activityInfo.packageName.equals(getPackageName())) continue;
+                        apps.put(new JSONObject().put("label", r.loadLabel(getPackageManager()).toString())
+                                .put("package", r.activityInfo.packageName));
+                    }
+                    Calendar now = Calendar.getInstance();
+                    return new JSONObject()
+                            .put("version", getPackageManager().getPackageInfo(getPackageName(), 0).versionName)
+                            .put("clock", String.format(Locale.US, "%02d:%02d", now.get(Calendar.HOUR_OF_DAY), now.get(Calendar.MINUTE)))
+                            .put("inFront", inFront)
+                            .put("asleep", asleep)
+                            .put("playing", current == null ? JSONObject.NULL : current.getName())
+                            .put("all", allMode || effectiveSelection().isEmpty())
+                            .put("selection", new JSONArray(effectiveSelection()))
+                            .put("videos", videos)
+                            .put("muted", muted)
+                            .put("volume", audio.getStreamVolume(AudioManager.STREAM_MUSIC))
+                            .put("maxVolume", audio.getStreamMaxVolume(AudioManager.STREAM_MUSIC))
+                            .put("brightness", brightness)
+                            .put("fill", fill)
+                            .put("canWrite", !needsWritePermission())
+                            .put("freeBytes", folder().getUsableSpace())
+                            .put("schedule", schedule.toJson())
+                            .put("apps", apps);
+                }
+            });
+        }
+
+        @Override
+        public void action(final String name, final JSONObject body) throws Exception {
+            onMain(new Callable<Void>() {
+                @Override
+                public Void call() throws Exception {
+                    switch (name) {
+                        case "loop":
+                            if (body.optBoolean("all", false)) {
+                                onSelectionChanged(new ArrayList<String>(), true);
+                            } else if (body.has("solo")) {
+                                videoFile(body.getString("solo"));
+                                onSolo(body.getString("solo"));
+                            } else {
+                                JSONArray names = body.getJSONArray("names");
+                                List<String> list = new ArrayList<>();
+                                for (int i = 0; i < names.length(); i++) list.add(names.getString(i));
+                                onSelectionChanged(list, list.isEmpty());
+                            }
+                            if (picker.isOpen()) openPicker();
+                            break;
+                        case "sound":
+                            if (body.has("muted")) setMuted(body.getBoolean("muted"));
+                            if (body.has("volume")) {
+                                int max = audio.getStreamMaxVolume(AudioManager.STREAM_MUSIC);
+                                audio.setStreamVolume(AudioManager.STREAM_MUSIC,
+                                        Math.max(0, Math.min(max, body.getInt("volume"))), 0);
+                            }
+                            break;
+                        case "screen":
+                            if (body.has("brightness")) setBrightness(body.getInt("brightness"));
+                            if (body.has("fill")) setFill(body.getBoolean("fill"));
+                            if (body.has("asleep")) setAsleep(body.getBoolean("asleep"));
+                            break;
+                        case "schedule":
+                            setSchedule(Schedule.parse(body.toString()));
+                            break;
+                        case "reload":
+                            if (hasVideoPermission()) startPlaylist();
+                            break;
+                        case "open":
+                            openApp(body.getString("package"));
+                            break;
+                        default:
+                            throw new IllegalArgumentException("Unknown action " + name);
+                    }
+                    return null;
+                }
+            });
+        }
+
+        @Override
+        public File thumbnail(String name) {
+            File f = videoFile(name);
+            return f.isFile() ? thumbnails.jpeg(f) : null;
+        }
+
+        @Override
+        public void upload(String name, InputStream body, long length) throws Exception {
+            File dest = videoFile(name);
+            File dir = folder();
+            dir.mkdirs();
+            if (dir.getUsableSpace() < length + FREE_SPACE_MARGIN) {
+                throw new IllegalArgumentException("Not enough free space on this device");
+            }
+            File part = new File(dir, "." + name + ".partial");
+            try {
+                OutputStream out = new FileOutputStream(part);
+                try {
+                    byte[] buf = new byte[65536];
+                    long left = length;
+                    while (left > 0) {
+                        int n = body.read(buf, 0, (int) Math.min(buf.length, left));
+                        if (n < 0) throw new IOException("The upload was cut off");
+                        out.write(buf, 0, n);
+                        left -= n;
+                    }
+                } finally {
+                    out.close();
+                }
+                if (dest.exists() && !dest.delete()) throw new IOException("Couldn't replace " + name);
+                if (!part.renameTo(dest)) throw new IOException("Couldn't save " + name);
+            } catch (IOException e) {
+                part.delete();
+                if (needsWritePermission()) {
+                    throw new IllegalArgumentException("Loop Player isn't allowed to save files: allow storage access on the device");
+                }
+                throw e;
+            }
+            onMain(new Callable<Void>() {
+                @Override
+                public Void call() {
+                    libraryChanged();
+                    return null;
+                }
+            });
+        }
+
+        @Override
+        public void delete(String name) throws Exception {
+            File f = videoFile(name);
+            if (!f.isFile()) throw new IllegalArgumentException("No video called " + name);
+            if (!f.delete()) throw new IllegalArgumentException("This device won't let Loop Player delete " + name);
+            onMain(new Callable<Void>() {
+                @Override
+                public Void call() {
+                    libraryChanged();
+                    return null;
+                }
+            });
+        }
+    }
+
+    /** Brings another app to the screen, or this one back (Android 10+ may block this while the player isn't in
+     *  front, unless the player is the home screen). */
+    private void openApp(String packageName) {
+        Intent intent;
+        if (packageName.equals(getPackageName())) {
+            intent = new Intent(this, PlayerActivity.class).addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT);
+        } else {
+            intent = getPackageManager().getLaunchIntentForPackage(packageName);
+            if (intent == null) throw new IllegalArgumentException("No app " + packageName + " to open");
+        }
+        startActivity(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+    }
+
     // ---- Settings ----
 
     private void showMenu() {
+        final boolean remoteOn = remote != null;
         final String[] items = {
             "Choose videos",
+            remoteOn ? "Phone remote: on  (tap for off)\n" + remoteAddress() + "   PIN " + remotePin()
+                     : "Phone remote: off  (tap for on)",
             muted ? "Sound: off  (tap for on)" : "Sound: on  (tap for off)",
             fill ? "Picture: fill the screen  (tap to fit)" : "Picture: fit the whole video  (tap to fill)",
             isHome() ? "Home screen: on  (tap for off)" : "Home screen: off  (tap for on)",
+            "Sleep (tap the screen to wake)",
             "Reload videos",
             "Android settings",
             "Exit player",
@@ -422,15 +873,17 @@ public class PlayerActivity extends Activity implements VideoPicker.Listener {
                     public void onClick(DialogInterface dialog, int which) {
                         switch (which) {
                             case 0: openPicker(); break;
-                            case 1: setMuted(!muted); break;
-                            case 2: setFill(!fill); break;
-                            case 3: setHome(!isHome()); break;
-                            case 4:
+                            case 1: setRemote(!remoteOn); break;
+                            case 2: setMuted(!muted); break;
+                            case 3: setFill(!fill); break;
+                            case 4: setHome(!isHome()); break;
+                            case 5: setAsleep(true); break;
+                            case 6:
                                 if (hasVideoPermission()) startPlaylist();
                                 else requestPermissions(new String[] {videoPermission()}, PERMISSION_REQUEST);
                                 break;
-                            case 5: startActivity(new Intent(Settings.ACTION_SETTINGS)); break;
-                            case 6: finish(); break;
+                            case 7: startActivity(new Intent(Settings.ACTION_SETTINGS)); break;
+                            case 8: finish(); break;
                         }
                     }
                 })
