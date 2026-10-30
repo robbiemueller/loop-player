@@ -89,7 +89,8 @@ public class PlayerActivity extends Activity implements VideoPicker.Listener {
     private MediaPlayer player;
     private Thumbnails thumbnails;
     private AudioManager audio;
-    private RemoteServer remote;
+    private volatile RemoteServer remote;
+    private final Object remoteLock = new Object();
     private Schedule schedule;
     private List<File> library = new ArrayList<>();
     private List<File> playlist = new ArrayList<>();
@@ -612,7 +613,9 @@ public class PlayerActivity extends Activity implements VideoPicker.Listener {
         String saved = prefs.getString("remote_sessions", "");
         Set<String> sessions = new LinkedHashSet<>();
         if (!saved.isEmpty()) sessions.addAll(Arrays.asList(saved.split("\n")));
-        remote = new RemoteServer(REMOTE_PORT, remotePin(), sessions, new RemoteApi());
+        RemoteApi api = new RemoteApi();
+        remote = new RemoteServer(REMOTE_PORT, remotePin(), sessions, api);
+        api.server = remote;
         try {
             remote.start();
         } catch (IOException e) {
@@ -640,8 +643,11 @@ public class PlayerActivity extends Activity implements VideoPicker.Listener {
 
     /** A fresh PIN, and every phone has to sign in again with it. */
     private void newRemotePin() {
-        prefs.edit().remove("remote_pin").remove("remote_sessions").apply();
-        stopRemote();
+        synchronized (remoteLock) {
+            // Stop the old server first, so a sign-in still in flight on it can't save its session afterwards.
+            stopRemote();
+            prefs.edit().remove("remote_pin").remove("remote_sessions").apply();
+        }
         startRemote(true);
     }
 
@@ -683,6 +689,8 @@ public class PlayerActivity extends Activity implements VideoPicker.Listener {
     }
 
     private class RemoteApi implements RemoteServer.Api {
+        RemoteServer server;
+
         @Override
         public byte[] page() throws IOException {
             InputStream in = getAssets().open("remote.html");
@@ -837,7 +845,10 @@ public class PlayerActivity extends Activity implements VideoPicker.Listener {
 
         @Override
         public void sessionsChanged(List<String> tokens) {
-            prefs.edit().putString("remote_sessions", TextUtils.join("\n", tokens)).apply();
+            synchronized (remoteLock) {
+                if (server != remote) return;  // a server that New PIN or turning the remote off already stopped
+                prefs.edit().putString("remote_sessions", TextUtils.join("\n", tokens)).apply();
+            }
         }
 
         @Override

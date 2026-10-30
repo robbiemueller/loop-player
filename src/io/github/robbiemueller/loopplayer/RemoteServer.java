@@ -38,8 +38,8 @@ import java.util.concurrent.Executors;
  *
  * Signing in: the page sends the PIN shown on the screen to /api/login and gets back a cookie holding a random
  * session token; later calls are checked against the token, not the PIN. Scripts can send the PIN as an X-Pin
- * header instead. Five wrong PINs from one address lock that address out for a minute; phones that are already
- * signed in keep working. Calls that change something must also carry an X-Remote header, which a web page on
+ * header instead. Five wrong PINs from one address lock that address out for a minute, and twenty from anywhere in
+ * ten minutes stop all PIN tries until the ten minutes are up; phones that are already signed in keep working. Calls that change something must also carry an X-Remote header, which a web page on
  * another site can't add without the browser asking first. Only clients on the local network are answered, and only
  * when they address the device by IP (not by a host name, which a hostile site could point at it).
  *   GET    /                      the control page
@@ -74,13 +74,18 @@ final class RemoteServer {
     private static final int MAX_FAILURES = 5;
     private static final int MAX_SESSIONS = 20;
     private static final long LOCKOUT_MS = 60000;
+    private static final int GLOBAL_FAILURES = 20;
+    private static final long GLOBAL_WINDOW_MS = 10 * 60000;
+    private static final int MAX_TRACKED = 1000;
     private static final int TIMEOUT_MS = 30000;
 
     private final int port;
     private final byte[] pin;
     private final Api api;
     private final LinkedHashSet<String> sessions;
-    private final Map<String, long[]> failures = new HashMap<>();  // address -> {count, locked until}
+    private final Map<String, long[]> failures = new HashMap<>();  // client key -> {count, locked until}
+    private long globalWindowStart;
+    private int globalFailures;
     private final SecureRandom random = new SecureRandom();
     private final ExecutorService pool = Executors.newFixedThreadPool(4);
     private ServerSocket socket;
@@ -135,7 +140,7 @@ final class RemoteServer {
             InputStream in = new BufferedInputStream(client.getInputStream());
             OutputStream out = new BufferedOutputStream(client.getOutputStream());
             String head = readHead(in);
-            if (head != null) handle(head, client.getInetAddress().getHostAddress(), in, out);
+            if (head != null) handle(head, clientKey(client.getInetAddress()), in, out);
             out.flush();
         } catch (IOException ignored) {
             // The phone went away mid-request.
@@ -245,23 +250,39 @@ final class RemoteServer {
         }
     }
 
-    /** Checks a PIN in constant time, counting wrong ones per address; answers 401 or 429 itself when it's wrong. */
+    /**
+     * Checks a PIN in constant time and answers 401 or 429 itself when it's wrong. Wrong PINs are counted per address
+     * (IPv6 by its /64 network, since one device can use many addresses there), and across everyone: past
+     * GLOBAL_FAILURES wrong PINs in GLOBAL_WINDOW_MS, nobody can try a PIN until the window ends. Phones that are
+     * already signed in never get here, so a flood of guesses doesn't lock them out.
+     */
     private boolean checkPin(String from, String given, OutputStream out) throws IOException {
         long now = System.currentTimeMillis();
         synchronized (failures) {
+            if (now - globalWindowStart > GLOBAL_WINDOW_MS) {
+                globalWindowStart = now;
+                globalFailures = 0;
+            }
             long[] f = failures.get(from);
-            if (f != null && now < f[1]) {
-                sendJson(out, 429, error("Too many wrong PINs. Try again in a minute."));
+            if ((f != null && now < f[1]) || globalFailures >= GLOBAL_FAILURES) {
+                sendJson(out, 429, error("Too many wrong PINs. Try again later."));
                 return false;
             }
             if (given != null && MessageDigest.isEqual(given.getBytes(UTF8), pin)) {
                 failures.remove(from);
                 return true;
             }
+            globalFailures++;
             if (f == null) {
-                if (failures.size() > 1000) failures.clear();  // don't let a flood of addresses grow this forever
+                // Forget addresses that aren't locked out before taking on more; never forget a lockout.
+                if (failures.size() >= MAX_TRACKED) {
+                    Iterator<long[]> it = failures.values().iterator();
+                    while (it.hasNext()) {
+                        if (it.next()[1] <= now) it.remove();
+                    }
+                }
                 f = new long[2];
-                failures.put(from, f);
+                if (failures.size() < MAX_TRACKED) failures.put(from, f);
             }
             if (++f[0] >= MAX_FAILURES) {
                 f[0] = 0;
@@ -270,6 +291,18 @@ final class RemoteServer {
         }
         sendJson(out, 401, error(given == null || given.isEmpty() ? "PIN needed" : "Wrong PIN"));
         return false;
+    }
+
+    /** Who to count wrong PINs against: the IPv4 address, or the /64 network of an IPv6 one. */
+    private static String clientKey(InetAddress address) {
+        InetAddress a = unmap(address);
+        if (a instanceof Inet6Address) {
+            byte[] b = a.getAddress();
+            StringBuilder key = new StringBuilder("v6:");
+            for (int i = 0; i < 8; i++) key.append(String.format(Locale.US, "%02x", b[i]));
+            return key.toString();
+        }
+        return a.getHostAddress();
     }
 
     private String newSession() {
@@ -302,27 +335,33 @@ final class RemoteServer {
     }
 
     /** Private, link-local and loopback addresses: the local network and the device itself. */
-    private static boolean isLocal(InetAddress a) {
+    private static boolean isLocal(InetAddress address) {
+        InetAddress a = unmap(address);
         if (a == null) return false;
         if (a.isLoopbackAddress() || a.isLinkLocalAddress() || a.isSiteLocalAddress()) return true;
         if (a instanceof Inet6Address) {
-            byte[] b = a.getAddress();
-            boolean mapped = true;  // ::ffff:a.b.c.d, how an IPv4 phone can show up on a dual-stack socket
-            for (int i = 0; i < 10; i++) mapped &= b[i] == 0;
-            if (mapped && b[10] == (byte) 0xff && b[11] == (byte) 0xff) {
-                try {
-                    return isLocal(InetAddress.getByAddress(new byte[] {b[12], b[13], b[14], b[15]}));
-                } catch (IOException e) {
-                    return false;
-                }
-            }
-            return (b[0] & 0xfe) == 0xfc;  // unique local fc00::/7
+            return (a.getAddress()[0] & 0xfe) == 0xfc;  // unique local fc00::/7
         }
         if (a instanceof Inet4Address) {
             byte[] b = a.getAddress();
             return (b[0] & 0xff) == 100 && (b[1] & 0xc0) == 64;  // carrier-grade NAT 100.64/10, used by some hotspots
         }
         return false;
+    }
+
+    /** An IPv4 phone can show up as ::ffff:a.b.c.d on a dual-stack socket: treat it as the IPv4 address it is. */
+    private static InetAddress unmap(InetAddress a) {
+        if (!(a instanceof Inet6Address)) return a;
+        byte[] b = a.getAddress();
+        for (int i = 0; i < 10; i++) {
+            if (b[i] != 0) return a;
+        }
+        if (b[10] != (byte) 0xff || b[11] != (byte) 0xff) return a;
+        try {
+            return InetAddress.getByAddress(new byte[] {b[12], b[13], b[14], b[15]});
+        } catch (IOException e) {
+            return a;
+        }
     }
 
     /** The Host header names the device by IP address (or localhost), not by a name that could be pointed at it. */
