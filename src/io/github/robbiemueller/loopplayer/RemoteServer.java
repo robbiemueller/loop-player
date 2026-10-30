@@ -39,8 +39,8 @@ import java.util.concurrent.Executors;
  * Signing in: the page sends the PIN shown on the screen to /api/login and gets back a cookie holding a random
  * session token; later calls are checked against the token, not the PIN. Scripts can send the PIN as an X-Pin
  * header instead. Five wrong PINs from one address lock that address out for a minute, and twenty from anywhere in
- * ten minutes stop all PIN tries until the ten minutes are up; phones that are already signed in keep working, and
- * opening the hold menu on the device (which shows the PIN) clears every lockout. Calls that change something must also carry an X-Remote header, which a web page on
+ * ten minutes stop all PIN tries until the ten minutes are up; phones that are already signed in keep working. New
+ * PIN on the device starts a fresh server, which clears every lockout and makes earlier guesses useless. Calls that change something must also carry an X-Remote header, which a web page on
  * another site can't add without the browser asking first. Only clients on the local network are answered, and only
  * when they address the device by IP (not by a host name, which a hostile site could point at it).
  *   GET    /                      the control page
@@ -294,19 +294,14 @@ final class RemoteServer {
         return false;
     }
 
-    /** Clears every lockout. Called when someone at the device opens the menu that shows the PIN. */
-    void resetLockouts() {
-        synchronized (failures) {
-            failures.clear();
-            globalFailures = 0;
-        }
-    }
-
-    /** Who to count wrong PINs against: the IPv4 address, or the /64 network of an IPv6 one (except link-local
-     *  addresses, which all share fe80::/64, so those count one by one). */
+    /** Who to count wrong PINs against: the IPv4 address, the /64 network of an IPv6 one, or for link-local IPv6
+     *  (where one device can make up any number of addresses) the whole link. */
     private static String clientKey(InetAddress address) {
         InetAddress a = unmap(address);
-        if (a instanceof Inet6Address && !a.isLinkLocalAddress()) {
+        if (a instanceof Inet6Address && a.isLinkLocalAddress()) {
+            return "ll:" + ((Inet6Address) a).getScopeId();
+        }
+        if (a instanceof Inet6Address) {
             byte[] b = a.getAddress();
             StringBuilder key = new StringBuilder("v6:");
             for (int i = 0; i < 8; i++) key.append(String.format(Locale.US, "%02x", b[i]));
