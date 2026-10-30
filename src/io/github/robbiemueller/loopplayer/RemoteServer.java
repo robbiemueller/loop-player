@@ -11,6 +11,9 @@ import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.net.Inet4Address;
+import java.net.Inet6Address;
+import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
@@ -18,20 +21,29 @@ import java.net.SocketException;
 import java.net.URLDecoder;
 import java.nio.charset.Charset;
 import java.security.MessageDigest;
+import java.security.SecureRandom;
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.Iterator;
+import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 /**
  * The phone remote: a tiny HTTP server on the local network that serves the control page and a JSON API.
  *
- * Every /api/ call needs the PIN shown on the sign, sent once to /api/login, which answers with a cookie (or as an
- * X-Pin header, for scripts). Five wrong PINs in a row lock the API for a minute. Calls that change something must
- * also carry an X-Remote header, which a web page on another site can't add without the browser asking first.
+ * Signing in: the page sends the PIN shown on the screen to /api/login and gets back a cookie holding a random
+ * session token; later calls are checked against the token, not the PIN. Scripts can send the PIN as an X-Pin
+ * header instead. Five wrong PINs from one address lock that address out for a minute; phones that are already
+ * signed in keep working. Calls that change something must also carry an X-Remote header, which a web page on
+ * another site can't add without the browser asking first. Only clients on the local network are answered, and only
+ * when they address the device by IP (not by a host name, which a hostile site could point at it).
  *   GET    /                      the control page
- *   POST   /api/login {"pin"}     check the PIN, set the cookie
+ *   POST   /api/login {"pin"}     check the PIN, set the session cookie
  *   GET    /api/state             what's playing, the library, sound, screen and schedule
  *   GET    /api/thumb?name=       a video's thumbnail (JPEG)
  *   POST   /api/<action> {...}    loop, sound, screen, schedule, reload, open; answers with the new state
@@ -51,26 +63,32 @@ final class RemoteServer {
         void upload(String name, InputStream body, long length) throws Exception;
 
         void delete(String name) throws Exception;
+
+        /** Called (on a server thread) whenever a phone signs in, so the tokens can be kept across restarts. */
+        void sessionsChanged(List<String> tokens);
     }
 
     private static final Charset UTF8 = Charset.forName("UTF-8");
     private static final int MAX_HEAD = 16 * 1024;
     private static final int MAX_JSON = 256 * 1024;
     private static final int MAX_FAILURES = 5;
+    private static final int MAX_SESSIONS = 20;
     private static final long LOCKOUT_MS = 60000;
     private static final int TIMEOUT_MS = 30000;
 
     private final int port;
     private final byte[] pin;
     private final Api api;
+    private final LinkedHashSet<String> sessions;
+    private final Map<String, long[]> failures = new HashMap<>();  // address -> {count, locked until}
+    private final SecureRandom random = new SecureRandom();
     private final ExecutorService pool = Executors.newFixedThreadPool(4);
     private ServerSocket socket;
-    private int failures;
-    private long lockedUntil;
 
-    RemoteServer(int port, String pin, Api api) {
+    RemoteServer(int port, String pin, Set<String> sessions, Api api) {
         this.port = port;
         this.pin = pin.getBytes(UTF8);
+        this.sessions = new LinkedHashSet<>(sessions);
         this.api = api;
     }
 
@@ -111,11 +129,13 @@ final class RemoteServer {
 
     private void serve(Socket client) {
         try {
+            // Only devices on the local network (and the device itself) get an answer.
+            if (!isLocal(client.getInetAddress())) return;
             client.setSoTimeout(TIMEOUT_MS);
             InputStream in = new BufferedInputStream(client.getInputStream());
             OutputStream out = new BufferedOutputStream(client.getOutputStream());
             String head = readHead(in);
-            if (head != null) handle(head, in, out);
+            if (head != null) handle(head, client.getInetAddress().getHostAddress(), in, out);
             out.flush();
         } catch (IOException ignored) {
             // The phone went away mid-request.
@@ -128,7 +148,7 @@ final class RemoteServer {
         }
     }
 
-    private void handle(String head, InputStream in, OutputStream out) throws IOException {
+    private void handle(String head, String from, InputStream in, OutputStream out) throws IOException {
         String[] lines = head.split("\r\n");
         String[] request = lines[0].split(" ");
         if (request.length < 3) {
@@ -141,6 +161,10 @@ final class RemoteServer {
         for (int i = 1; i < lines.length; i++) {
             int colon = lines[i].indexOf(':');
             if (colon > 0) headers.put(lines[i].substring(0, colon).trim().toLowerCase(Locale.US), lines[i].substring(colon + 1).trim());
+        }
+        if (!isAddressHost(headers.get("host"))) {
+            sendJson(out, 403, error("Open the remote by the device's IP address"));
+            return;
         }
         String path = target;
         Map<String, String> params = new HashMap<>();
@@ -156,8 +180,7 @@ final class RemoteServer {
         try {
             if (headers.containsKey("content-length")) length = Long.parseLong(headers.get("content-length"));
         } catch (NumberFormatException e) {
-            sendJson(out, 400, error("Bad length"));
-            return;
+            length = -1;
         }
         if (length < 0) {
             sendJson(out, 400, error("Bad length"));
@@ -182,13 +205,17 @@ final class RemoteServer {
         try {
             if (what.equals("login") && method.equals("POST")) {
                 JSONObject body = new JSONObject(readText(in, length));
-                if (!checkPin(body.optString("pin", ""), out)) return;
+                if (!checkPin(from, body.optString("pin", ""), out)) return;
+                String token = newSession();
                 send(out, 200, "application/json", new JSONObject().put("ok", true).toString().getBytes(UTF8),
-                        "Set-Cookie: lp=" + new String(pin, UTF8) + "; Max-Age=31536000; Path=/; HttpOnly; SameSite=Strict\r\n");
+                        "Set-Cookie: lp=" + token + "; Max-Age=31536000; Path=/; HttpOnly; SameSite=Strict\r\n");
                 return;
             }
-            String given = headers.containsKey("x-pin") ? headers.get("x-pin") : cookie(headers.get("cookie"), "lp");
-            if (!checkPin(given, out)) return;
+            boolean signedIn = hasSession(cookie(headers.get("cookie"), "lp"));
+            if (!signedIn && !(headers.containsKey("x-pin") && checkPin(from, headers.get("x-pin"), out))) {
+                if (!headers.containsKey("x-pin")) sendJson(out, 401, error("PIN needed"));
+                return;
+            }
 
             if (method.equals("GET") && what.equals("state")) {
                 sendJson(out, 200, api.state());
@@ -218,25 +245,94 @@ final class RemoteServer {
         }
     }
 
-    /** Compares in constant time and counts failures; answers 401 or 429 itself and returns false on a bad PIN. */
-    private boolean checkPin(String given, OutputStream out) throws IOException {
-        synchronized (this) {
-            long now = System.currentTimeMillis();
-            if (now < lockedUntil) {
+    /** Checks a PIN in constant time, counting wrong ones per address; answers 401 or 429 itself when it's wrong. */
+    private boolean checkPin(String from, String given, OutputStream out) throws IOException {
+        long now = System.currentTimeMillis();
+        synchronized (failures) {
+            long[] f = failures.get(from);
+            if (f != null && now < f[1]) {
                 sendJson(out, 429, error("Too many wrong PINs. Try again in a minute."));
                 return false;
             }
             if (given != null && MessageDigest.isEqual(given.getBytes(UTF8), pin)) {
-                failures = 0;
+                failures.remove(from);
                 return true;
             }
-            if (given != null && !given.isEmpty() && ++failures >= MAX_FAILURES) {
-                failures = 0;
-                lockedUntil = now + LOCKOUT_MS;
+            if (f == null) {
+                if (failures.size() > 1000) failures.clear();  // don't let a flood of addresses grow this forever
+                f = new long[2];
+                failures.put(from, f);
+            }
+            if (++f[0] >= MAX_FAILURES) {
+                f[0] = 0;
+                f[1] = now + LOCKOUT_MS;
             }
         }
         sendJson(out, 401, error(given == null || given.isEmpty() ? "PIN needed" : "Wrong PIN"));
         return false;
+    }
+
+    private String newSession() {
+        byte[] bytes = new byte[16];
+        random.nextBytes(bytes);
+        StringBuilder token = new StringBuilder();
+        for (byte b : bytes) token.append(String.format(Locale.US, "%02x", b));
+        List<String> copy;
+        synchronized (sessions) {
+            sessions.add(token.toString());
+            Iterator<String> oldest = sessions.iterator();
+            while (sessions.size() > MAX_SESSIONS) {
+                oldest.next();
+                oldest.remove();
+            }
+            copy = new ArrayList<>(sessions);
+        }
+        api.sessionsChanged(copy);
+        return token.toString();
+    }
+
+    private boolean hasSession(String token) {
+        if (token == null || token.isEmpty()) return false;
+        synchronized (sessions) {
+            for (String s : sessions) {
+                if (MessageDigest.isEqual(s.getBytes(UTF8), token.getBytes(UTF8))) return true;
+            }
+        }
+        return false;
+    }
+
+    /** Private, link-local and loopback addresses: the local network and the device itself. */
+    private static boolean isLocal(InetAddress a) {
+        if (a == null) return false;
+        if (a.isLoopbackAddress() || a.isLinkLocalAddress() || a.isSiteLocalAddress()) return true;
+        if (a instanceof Inet6Address) {
+            byte[] b = a.getAddress();
+            boolean mapped = true;  // ::ffff:a.b.c.d, how an IPv4 phone can show up on a dual-stack socket
+            for (int i = 0; i < 10; i++) mapped &= b[i] == 0;
+            if (mapped && b[10] == (byte) 0xff && b[11] == (byte) 0xff) {
+                try {
+                    return isLocal(InetAddress.getByAddress(new byte[] {b[12], b[13], b[14], b[15]}));
+                } catch (IOException e) {
+                    return false;
+                }
+            }
+            return (b[0] & 0xfe) == 0xfc;  // unique local fc00::/7
+        }
+        if (a instanceof Inet4Address) {
+            byte[] b = a.getAddress();
+            return (b[0] & 0xff) == 100 && (b[1] & 0xc0) == 64;  // carrier-grade NAT 100.64/10, used by some hotspots
+        }
+        return false;
+    }
+
+    /** The Host header names the device by IP address (or localhost), not by a name that could be pointed at it. */
+    private static boolean isAddressHost(String host) {
+        if (host == null) return false;
+        String h = host.toLowerCase(Locale.US);
+        if (h.startsWith("[")) return h.indexOf(']') > 0;  // an IPv6 literal
+        int colon = h.indexOf(':');
+        if (colon >= 0) h = h.substring(0, colon);
+        return h.equals("localhost") || h.matches("\\d{1,3}(\\.\\d{1,3}){3}");
     }
 
     private static String cookie(String header, String name) {

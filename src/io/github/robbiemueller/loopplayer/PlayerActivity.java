@@ -44,8 +44,10 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Calendar;
 import java.util.Collections;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Set;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.FutureTask;
@@ -65,7 +67,7 @@ import java.util.concurrent.TimeUnit;
  *   --ez mute true             sound off (false: on)
  *   --ez fill true             crop to fill the screen (false: fit the whole video)
  *   --ez home true             use as the home screen (false: stop)
- *   --ez remote true           phone remote on (false: off)
+ *   --ez remote false          phone remote off (it can only be turned on from the hold menu)
  *   --ez sleep true            screen dark and playback paused (false: wake)
  */
 public class PlayerActivity extends Activity implements VideoPicker.Listener {
@@ -285,7 +287,8 @@ public class PlayerActivity extends Activity implements VideoPicker.Listener {
         if (intent.hasExtra("mute")) setMuted(intent.getBooleanExtra("mute", false));
         if (intent.hasExtra("fill")) setFill(intent.getBooleanExtra("fill", false));
         if (intent.hasExtra("home")) setHome(intent.getBooleanExtra("home", false));
-        if (intent.hasExtra("remote")) setRemote(intent.getBooleanExtra("remote", false));
+        // Any app can send this activity an intent, so intents may only turn the remote off, never on.
+        if (intent.hasExtra("remote") && !intent.getBooleanExtra("remote", true)) setRemote(false);
         if (intent.hasExtra("sleep")) setAsleep(intent.getBooleanExtra("sleep", false));
         if (intent.getBooleanExtra("all", false)) {
             saveSelection(new ArrayList<String>(), true);
@@ -606,7 +609,10 @@ public class PlayerActivity extends Activity implements VideoPicker.Listener {
             if (announce) showNotice(remoteAddress() + "\nPIN " + remotePin(), 15000);
             return;
         }
-        remote = new RemoteServer(REMOTE_PORT, remotePin(), new RemoteApi());
+        String saved = prefs.getString("remote_sessions", "");
+        Set<String> sessions = new LinkedHashSet<>();
+        if (!saved.isEmpty()) sessions.addAll(Arrays.asList(saved.split("\n")));
+        remote = new RemoteServer(REMOTE_PORT, remotePin(), sessions, new RemoteApi());
         try {
             remote.start();
         } catch (IOException e) {
@@ -630,6 +636,13 @@ public class PlayerActivity extends Activity implements VideoPicker.Listener {
             prefs.edit().putString("remote_pin", pin).apply();
         }
         return pin;
+    }
+
+    /** A fresh PIN, and every phone has to sign in again with it. */
+    private void newRemotePin() {
+        prefs.edit().remove("remote_pin").remove("remote_sessions").apply();
+        stopRemote();
+        startRemote(true);
     }
 
     private static String remoteAddress() {
@@ -823,6 +836,11 @@ public class PlayerActivity extends Activity implements VideoPicker.Listener {
         }
 
         @Override
+        public void sessionsChanged(List<String> tokens) {
+            prefs.edit().putString("remote_sessions", TextUtils.join("\n", tokens)).apply();
+        }
+
+        @Override
         public void delete(String name) throws Exception {
             File f = videoFile(name);
             if (!f.isFile()) throw new IllegalArgumentException("No video called " + name);
@@ -853,38 +871,43 @@ public class PlayerActivity extends Activity implements VideoPicker.Listener {
     // ---- Settings ----
 
     private void showMenu() {
+        final List<String> labels = new ArrayList<>();
+        final List<Runnable> actions = new ArrayList<>();
         final boolean remoteOn = remote != null;
-        final String[] items = {
-            "Choose videos",
-            remoteOn ? "Phone remote: on  (tap for off)\n" + remoteAddress() + "   PIN " + remotePin()
-                     : "Phone remote: off  (tap for on)",
-            muted ? "Sound: off  (tap for on)" : "Sound: on  (tap for off)",
-            fill ? "Picture: fill the screen  (tap to fit)" : "Picture: fit the whole video  (tap to fill)",
-            isHome() ? "Home screen: on  (tap for off)" : "Home screen: off  (tap for on)",
-            "Sleep (tap the screen to wake)",
-            "Reload videos",
-            "Android settings",
-            "Exit player",
-        };
+        labels.add("Choose videos");
+        actions.add(new Runnable() { public void run() { openPicker(); } });
+        labels.add(remoteOn ? "Phone remote: on  (tap for off)\n" + remoteAddress() + "   PIN " + remotePin()
+                            : "Phone remote: off  (tap for on)");
+        actions.add(new Runnable() { public void run() { setRemote(!remoteOn); } });
+        if (remoteOn) {
+            labels.add("New PIN  (signs out every phone)");
+            actions.add(new Runnable() { public void run() { newRemotePin(); } });
+        }
+        labels.add(muted ? "Sound: off  (tap for on)" : "Sound: on  (tap for off)");
+        actions.add(new Runnable() { public void run() { setMuted(!muted); } });
+        labels.add(fill ? "Picture: fill the screen  (tap to fit)" : "Picture: fit the whole video  (tap to fill)");
+        actions.add(new Runnable() { public void run() { setFill(!fill); } });
+        labels.add(isHome() ? "Home screen: on  (tap for off)" : "Home screen: off  (tap for on)");
+        actions.add(new Runnable() { public void run() { setHome(!isHome()); } });
+        labels.add("Sleep  (tap the screen to wake)");
+        actions.add(new Runnable() { public void run() { setAsleep(true); } });
+        labels.add("Reload videos");
+        actions.add(new Runnable() {
+            public void run() {
+                if (hasVideoPermission()) startPlaylist();
+                else requestPermissions(new String[] {videoPermission()}, PERMISSION_REQUEST);
+            }
+        });
+        labels.add("Android settings");
+        actions.add(new Runnable() { public void run() { startActivity(new Intent(Settings.ACTION_SETTINGS)); } });
+        labels.add("Exit player");
+        actions.add(new Runnable() { public void run() { finish(); } });
         new AlertDialog.Builder(this)
                 .setTitle("Loop Player")
-                .setItems(items, new DialogInterface.OnClickListener() {
+                .setItems(labels.toArray(new String[0]), new DialogInterface.OnClickListener() {
                     @Override
                     public void onClick(DialogInterface dialog, int which) {
-                        switch (which) {
-                            case 0: openPicker(); break;
-                            case 1: setRemote(!remoteOn); break;
-                            case 2: setMuted(!muted); break;
-                            case 3: setFill(!fill); break;
-                            case 4: setHome(!isHome()); break;
-                            case 5: setAsleep(true); break;
-                            case 6:
-                                if (hasVideoPermission()) startPlaylist();
-                                else requestPermissions(new String[] {videoPermission()}, PERMISSION_REQUEST);
-                                break;
-                            case 7: startActivity(new Intent(Settings.ACTION_SETTINGS)); break;
-                            case 8: finish(); break;
-                        }
+                        actions.get(which).run();
                     }
                 })
                 .show();

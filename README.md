@@ -47,9 +47,12 @@ Turn on **Phone remote** in the hold menu. The screen shows an address such as `
   stays until the next time.
 
 Good to know:
-- The remote is **off until you turn it on**. It answers only on your local network, over plain HTTP, and only
-  with the PIN (five wrong tries lock it for a minute). Anyone on your Wi-Fi who sees the PIN can use it.
-- To see the address and PIN again, hold 3 s: they're on the **Phone remote** line of the menu.
+- The remote is **off until you turn it on**, and only the hold menu can turn it on. It answers only devices on your
+  local network, over plain HTTP. Your phone signs in once with the PIN and then stays signed in. Five wrong PINs
+  lock that phone or computer out for a minute; phones already signed in keep working. Anyone on your Wi-Fi who sees
+  the PIN can use it.
+- To see the address and PIN again, hold 3 s: they're on the **Phone remote** line of the menu. **New PIN** (just
+  below it) makes a fresh PIN and signs out every phone.
 - The schedule and the remote work while Loop Player is open. Sleep dims the backlight to its minimum, since apps
   can't switch the panel fully off.
 - Adding and deleting videos needs storage access on Android 6–10 (Loop Player asks when you turn the remote on).
@@ -79,7 +82,7 @@ adb shell am start -n io.github.robbiemueller.loopplayer/.PlayerActivity --ez al
 adb shell am start -n io.github.robbiemueller.loopplayer/.PlayerActivity --ez mute true     # or false
 adb shell am start -n io.github.robbiemueller.loopplayer/.PlayerActivity --ez fill true     # or false (fit)
 adb shell am start -n io.github.robbiemueller.loopplayer/.PlayerActivity --ez home true     # or false
-adb shell am start -n io.github.robbiemueller.loopplayer/.PlayerActivity --ez remote true   # phone remote on, or false
+adb shell am start -n io.github.robbiemueller.loopplayer/.PlayerActivity --ez remote false  # phone remote off
 adb shell am start -n io.github.robbiemueller.loopplayer/.PlayerActivity --ez sleep true    # screen to sleep, or false
 ```
 
@@ -105,7 +108,8 @@ On an FYD-835S (Rockchip RK3126, Android 6.0.1), we tested:
 - the permission prompt
 - playback and seamless looping
 - the swipe-up picker (tap to add or remove, hold to loop one, All, swipe down to close)
-- the phone remote: PIN and lockout, picking videos, sound, brightness, sleep and wake, uploading and deleting
+- the phone remote: PIN, sessions and lockout, picking videos, sound, brightness, sleep and wake, uploading and
+  deleting
 - the schedule (sleep, wake, brightness and loop changes firing at their times)
 - double-tap mute
 - fit and fill
