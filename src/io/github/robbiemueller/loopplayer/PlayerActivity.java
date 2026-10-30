@@ -1,6 +1,7 @@
 package io.github.robbiemueller.loopplayer;
 
 import android.app.Activity;
+import android.app.ActivityManager;
 import android.app.AlertDialog;
 import android.content.ComponentName;
 import android.content.DialogInterface;
@@ -869,13 +870,14 @@ public class PlayerActivity extends Activity implements VideoPicker.Listener {
     /** Brings another app to the screen, or this one back (Android 10+ may block this while the player isn't in
      *  front, unless the player is the home screen). */
     private void openApp(String packageName) {
-        Intent intent;
         if (packageName.equals(getPackageName())) {
-            intent = new Intent(this, PlayerActivity.class).addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT);
-        } else {
-            intent = getPackageManager().getLaunchIntentForPackage(packageName);
-            if (intent == null) throw new IllegalArgumentException("No app " + packageName + " to open");
+            // Bringing our own task back from behind another app: starting our activity again gets quietly ignored
+            // while we're in the background, but moving the task to the front works.
+            ((ActivityManager) getSystemService(ACTIVITY_SERVICE)).moveTaskToFront(getTaskId(), 0);
+            return;
         }
+        Intent intent = getPackageManager().getLaunchIntentForPackage(packageName);
+        if (intent == null) throw new IllegalArgumentException("No app " + packageName + " to open");
         startActivity(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
     }
 

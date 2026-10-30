@@ -11,6 +11,8 @@
          uploaded videos into Movies/loop on Android 6-10 (newer Android lets apps add media files without it) -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="29" />
+    <!-- So "Bring back" on the remote can move the player in front of another app -->
+    <uses-permission android:name="android.permission.REORDER_TASKS" />
 
     <!-- So the remote can list and open the other apps on the device (Android 11+ hides them otherwise) -->
     <queries>
