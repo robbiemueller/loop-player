@@ -1,6 +1,6 @@
 # Loop Player
 
-Turn an old Android screen into a looping video sign. Loop Player is a 16 KB app that plays the videos in one
+Turn an old Android screen into a looping video sign. Loop Player is a 30 KB app that plays the videos in one
 folder full screen, forever: no playback controls, no status bar, no ads, no accounts, no network. It suits cheap
 tabletop signage players, old tablets, digital photo frames and Android TV boxes running **Android 5.0 or newer**.
 
@@ -11,8 +11,16 @@ but nothing in it is specific to that device.
 
 - **Plays** every `.mp4`, `.mkv` and `.webm` in **`Movies/loop/`** on the device's storage (`/sdcard/Movies/loop/`),
   in name order, forever. A single file loops **seamlessly** inside the media player.
+- **Swipe up** to choose what loops. A panel of thumbnails slides up:
+  - **Tap** a video to add it to the loop or take it out. The number on each tile is its place in the order, so
+    tapping three videos plays them back to back in that order.
+  - **Hold** a video to loop just that one (the panel closes and it starts at once).
+  - **All** loops every video in the folder, including ones added later.
+  - Swipe down, tap above the panel or press Back to close it; it also closes by itself after 30 seconds. Unchosen
+    videos are greyed out, and the one playing now is marked. The choice is remembered across restarts.
 - **Double-tap:** sound off/on. It's remembered across restarts.
 - **Hold a finger down for 3 seconds:** opens the menu.
+  - **Choose videos** (the same panel as swiping up)
   - **Sound** on/off
   - **Picture:** *fit* the whole video (letterbox, the default) or *fill* the screen (crop)
   - **Home screen:** makes Loop Player the launcher, so it opens at boot and whenever Home is pressed (kiosk mode)
@@ -38,6 +46,9 @@ but nothing in it is specific to that device.
 
 ```sh
 adb shell am start -n io.github.robbiemueller.loopplayer/.PlayerActivity --ez reload true   # rescan the folder
+adb shell am start -n io.github.robbiemueller.loopplayer/.PlayerActivity --es play intro.mp4        # loop just this one
+adb shell am start -n io.github.robbiemueller.loopplayer/.PlayerActivity --es playlist "a.mp4,b.mp4"  # these, in order
+adb shell am start -n io.github.robbiemueller.loopplayer/.PlayerActivity --ez all true      # every video
 adb shell am start -n io.github.robbiemueller.loopplayer/.PlayerActivity --ez mute true     # or false
 adb shell am start -n io.github.robbiemueller.loopplayer/.PlayerActivity --ez fill true     # or false (fit)
 adb shell am start -n io.github.robbiemueller.loopplayer/.PlayerActivity --ez home true     # or false
@@ -59,6 +70,7 @@ adb shell am start -n io.github.robbiemueller.loopplayer/.PlayerActivity --ez ho
 On an FYD-835S (Rockchip RK3126, Android 6.0.1), we tested:
 - the permission prompt
 - playback and seamless looping
+- the swipe-up picker (tap to add or remove, hold to loop one, All, swipe down to close)
 - double-tap mute
 - fit and fill
 - the hold menu
