@@ -24,6 +24,11 @@ but nothing in it is specific to that device.
   - Swipe down, tap above the panel or press Back to close it; it also closes by itself after 30 seconds. Unchosen
     videos are greyed out, and the one playing now is marked. The choice is remembered across restarts.
 - **Swipe left** to skip to the next video, **swipe right** to go back to the one before.
+- **Swipe down** to go to the device's home screen, when that's another app (say, a launcher of your own with more
+  things to do on the screen).
+- **Interludes** (optional): a video that stays out of the loop and comes up on its own every so many videos, such
+  as a "sign our guestbook" card. Tapping it can open an app; when that app closes, the loop carries on with the
+  next video. See [Interludes](#interludes).
 - **Double-tap:** sound off/on. It's remembered across restarts.
 - **Hold a finger down for 3 seconds:** opens the menu.
   - **Choose videos** (the same panel as swiping up)
@@ -100,6 +105,25 @@ of tags, and tags match regardless of case. Edit the file on a computer and push
 `adb push tags.json /sdcard/Movies/loop/`, then reload, or tag videos from the phone remote (which writes the same
 file). Videos without tags still play under **All**.
 
+## Interludes
+
+An interlude is a video that comes up between the others instead of being part of the loop: once every so many
+videos, whatever is looping (All, tags or picks). Add them to the same `tags.json`:
+
+```json
+"interludes": {
+  "guestbook.mp4": {"every": 5, "open": "com.example.guestbook"}
+}
+```
+
+- `every`: how many videos play between showings (5 here: it comes up after every fifth video).
+- `open` (optional): an app to open when someone taps the screen during the interlude, by package name, or a
+  particular screen of it as `package/.ActivityName`. When that app closes (or brings Loop Player back), the loop
+  carries on with the next video.
+
+Interludes don't appear in the swipe-up panel or the remote's video list. A single video looping on its own plays
+no interludes, since it never ends.
+
 ## Remote control over ADB
 
 ```sh
@@ -141,6 +165,8 @@ On an FYD-835S (Rockchip RK3126, Android 6.0.1), we tested:
 - playback and seamless looping
 - the swipe-up picker (tap to add or remove, hold to loop one, All, tags, Shuffle, swipe down to close)
 - swiping left and right to skip ahead and back
+- an interlude every five videos, opening an app on a tap and carrying on when it closes; swiping down to another
+  home screen
 - the phone remote: PIN, sessions and lockout, picking videos, sound, brightness, sleep and wake, uploading and
   deleting
 - the schedule (sleep, wake, brightness and loop changes firing at their times)

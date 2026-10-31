@@ -45,9 +45,11 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Calendar;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Random;
 import java.util.Set;
 import java.util.concurrent.Callable;
@@ -105,6 +107,11 @@ public class PlayerActivity extends Activity implements VideoPicker.Listener {
     private List<File> queue = new ArrayList<>();
     /** What played before, for swiping back; newest last. */
     private final List<File> history = new ArrayList<>();
+    /** Videos played since each interlude last came up, and the video to carry on from after one. */
+    private final Map<String, Integer> sinceInterlude = new HashMap<>();
+    private File beforeInterlude;
+    /** An interlude opened an app; when we're back in front, go on to the next video. */
+    private boolean nextOnReturn;
     private File current;
     private boolean allMode;
     private List<String> selection = new ArrayList<>();
@@ -197,6 +204,11 @@ public class PlayerActivity extends Activity implements VideoPicker.Listener {
         final float density = getResources().getDisplayMetrics().density;
         final GestureDetector gestures = new GestureDetector(this, new GestureDetector.SimpleOnGestureListener() {
             @Override
+            public boolean onSingleTapConfirmed(MotionEvent e) {
+                return openFromInterlude();
+            }
+
+            @Override
             public boolean onDoubleTap(MotionEvent e) {
                 setMuted(!muted);
                 showNotice(muted ? "Sound off" : "Sound on");
@@ -210,6 +222,10 @@ public class PlayerActivity extends Activity implements VideoPicker.Listener {
                 float dy = e2.getY() - e1.getY();
                 if (dy < -100 * density && vy < -600 && Math.abs(dy) > Math.abs(dx)) {
                     openPicker();
+                    return true;
+                }
+                if (dy > 100 * density && vy > 600 && Math.abs(dy) > Math.abs(dx)) {
+                    goHome();
                     return true;
                 }
                 // Sideways: left for the next video, right for the one before.
@@ -356,6 +372,11 @@ public class PlayerActivity extends Activity implements VideoPicker.Listener {
         super.onResume();
         inFront = true;
         hideSystemUi();
+        if (nextOnReturn) {
+            // Back from the app an interlude opened: on to the next video rather than the interlude again.
+            nextOnReturn = false;
+            if (isInterlude(current)) playNext();
+        }
         if (!asleep && !video.isPlaying() && !playlist.isEmpty()) video.start();
     }
 
@@ -415,8 +436,55 @@ public class PlayerActivity extends Activity implements VideoPicker.Listener {
         if (files == null) return;
         Arrays.sort(files);
         for (File f : files) {
-            if (f.isFile() && isVideoName(f.getName())) library.add(f);
+            // Interludes stay out of the library: they come up on their own every so often.
+            if (f.isFile() && isVideoName(f.getName()) && tags.interlude(f.getName()) == null) library.add(f);
         }
+    }
+
+    private boolean isInterlude(File f) {
+        return f != null && tags.interlude(f.getName()) != null;
+    }
+
+    /** Counts one more video played and returns an interlude whose turn has come, starting its count again. */
+    private File dueInterlude() {
+        File due = null;
+        for (Tags.Interlude i : tags.interludes()) {
+            File f = new File(folder(), i.video);
+            if (!f.isFile()) continue;
+            Integer n = sinceInterlude.get(i.video);
+            int count = (n == null ? 0 : n) + 1;
+            if (due == null && count >= i.every) {
+                due = f;
+                count = 0;
+            }
+            sinceInterlude.put(i.video, count);
+        }
+        return due;
+    }
+
+    /** Swipe down: the device's home screen, when that's another app (a launcher with more on the device). */
+    private void goHome() {
+        Intent home = new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME);
+        ResolveInfo r = getPackageManager().resolveActivity(home, PackageManager.MATCH_DEFAULT_ONLY);
+        if (r == null || r.activityInfo == null || getPackageName().equals(r.activityInfo.packageName)) return;
+        startActivity(home.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+    }
+
+    /** A tap during an interlude that names an app opens that app; when it closes, the loop carries on. */
+    private boolean openFromInterlude() {
+        Tags.Interlude i = current == null ? null : tags.interlude(current.getName());
+        if (i == null || i.open.isEmpty()) return false;
+        // "com.example.app" opens the app; "com.example.app/.SomeActivity" opens that screen of it.
+        ComponentName screen = i.open.contains("/") ? ComponentName.unflattenFromString(i.open) : null;
+        Intent app = screen != null ? new Intent(Intent.ACTION_MAIN).setComponent(screen)
+                : getPackageManager().getLaunchIntentForPackage(i.open);
+        if (app == null || getPackageManager().resolveActivity(app, 0) == null) {
+            showNotice("Not installed: " + i.open);
+            return true;
+        }
+        nextOnReturn = true;
+        startActivity(app.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+        return true;
     }
 
     /** Tag mode is on and at least one video on disk has one of the tags. */
@@ -490,12 +558,23 @@ public class PlayerActivity extends Activity implements VideoPicker.Listener {
 
     private void playNext() {
         if (queue.isEmpty()) return;
-        remember(current);
-        int at = queue.indexOf(current);
+        // After an interlude, carry on from the video that played before it.
+        boolean fromInterlude = isInterlude(current);
+        File last = fromInterlude ? beforeInterlude : current;
+        if (!fromInterlude) {
+            remember(current);
+            File due = dueInterlude();
+            if (due != null) {
+                beforeInterlude = current;
+                play(due);
+                return;
+            }
+        }
+        int at = queue.indexOf(last);
         if (at + 1 >= queue.size() && shuffle && queue.size() > 1) {
             // Round again in a new order, without repeating the video that just played.
             queue = makeQueue(null);
-            if (queue.get(0).equals(current)) Collections.swap(queue, 0, 1 + random.nextInt(queue.size() - 1));
+            if (queue.get(0).equals(last)) Collections.swap(queue, 0, 1 + random.nextInt(queue.size() - 1));
             play(queue.get(0));
             return;
         }

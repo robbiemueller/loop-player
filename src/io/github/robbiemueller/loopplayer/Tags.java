@@ -26,13 +26,31 @@ import java.util.Set;
  * <pre>{"order": ["Halloween", "Music"], "videos": {"01-intro.mp4": ["Halloween", "Music"], ...}}</pre>
  * "order" is optional and only sets the order of the tag buttons; tags not in it follow, most used first.
  * Tags match without regard to case.
+ * <p>
+ * The same file can name interludes: videos kept out of the loop that come up once every so many videos instead,
+ * and can open an app when tapped (a guestbook, a menu, a game), coming back to the loop when it closes:
+ * <pre>"interludes": {"guestbook.mp4": {"every": 5, "open": "com.example.guestbook"}}</pre>
  */
 final class Tags {
     static final String FILE_NAME = "tags.json";
     private static final Charset UTF8 = Charset.forName("UTF-8");
 
+    static final class Interlude {
+        final String video;
+        final int every;
+        final String open;
+
+        Interlude(String video, int every, String open) {
+            this.video = video;
+            this.every = every;
+            this.open = open;
+        }
+    }
+
     private final Map<String, List<String>> byVideo = new LinkedHashMap<>();
     private final List<String> order = new ArrayList<>();
+    private final List<Interlude> interludes = new ArrayList<>();
+    private JSONObject interludesJson;  // written back as it was, so tagging from the remote keeps it
 
     /** Reads the file; a missing or broken one just means no tags. */
     static Tags load(File file) {
@@ -71,6 +89,17 @@ final class Tags {
                     t.byVideo.put(name, tags);
                 }
             }
+            JSONObject inter = json.optJSONObject("interludes");
+            if (inter != null) {
+                t.interludesJson = inter;
+                JSONArray names = inter.names();
+                for (int i = 0; names != null && i < names.length(); i++) {
+                    String name = names.getString(i);
+                    JSONObject o = inter.optJSONObject(name);
+                    int every = o == null ? 0 : o.optInt("every", 0);
+                    if (every >= 1) t.interludes.add(new Interlude(name, every, o.optString("open", "").trim()));
+                }
+            }
         } catch (Exception ignored) {
             // Leave whatever was read; a bad file shouldn't stop the videos playing.
         }
@@ -86,6 +115,7 @@ final class Tags {
                 if (!e.getValue().isEmpty()) videos.put(e.getKey(), new JSONArray(e.getValue()));
             }
             json.put("videos", videos);
+            if (interludesJson != null) json.put("interludes", interludesJson);
         } catch (Exception e) {
             throw new IOException("Couldn't write the tags");
         }
@@ -100,6 +130,18 @@ final class Tags {
         }
         if (file.exists() && !file.delete()) throw new IOException("Couldn't replace " + file.getName());
         if (!part.renameTo(file)) throw new IOException("Couldn't save " + file.getName());
+    }
+
+    List<Interlude> interludes() {
+        return interludes;
+    }
+
+    /** The video's interlude settings, or null for an ordinary video. */
+    Interlude interlude(String video) {
+        for (Interlude i : interludes) {
+            if (i.video.equals(video)) return i;
+        }
+        return null;
     }
 
     List<String> of(String video) {

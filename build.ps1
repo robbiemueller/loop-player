@@ -6,8 +6,8 @@
 # Keep your keystore: Android only installs an update signed with the same key as the installed app.
 param([switch]$Install, [string]$Keystore, [string]$StorePass = 'loopplayer')
 $ErrorActionPreference = 'Stop'
-$versionCode = 5
-$versionName = '1.4.0'
+$versionCode = 6
+$versionName = '1.5.0'
 $targetSdk = 35
 
 $sdk = if ($env:ANDROID_HOME) { $env:ANDROID_HOME } else { "$env:LOCALAPPDATA\Android\Sdk" }
@@ -35,8 +35,12 @@ $classes = Get-ChildItem "$out\classes" -Recurse -Filter *.class | ForEach-Objec
 & "$bt\d8.bat" --release --min-api 21 --lib $androidJar --output "$out\dex" @classes
 Assert-Ok 'd8'
 
+# The icon (res\mipmap-*, drawn by tools\make_icon.py) is compiled first, then linked in with the manifest.
+& "$bt\aapt2.exe" compile --dir "$here\res" -o "$out\res.zip"
+Assert-Ok 'aapt2 compile'
 & "$bt\aapt2.exe" link -o "$out\base.apk" -I $androidJar --manifest "$here\AndroidManifest.xml" -A "$here\assets" `
-    --min-sdk-version 21 --target-sdk-version $targetSdk --version-code $versionCode --version-name $versionName
+    --min-sdk-version 21 --target-sdk-version $targetSdk --version-code $versionCode --version-name $versionName `
+    "$out\res.zip"
 Assert-Ok 'aapt2'
 Push-Location "$out\dex"
 & "$jdk\jar.exe" uf "$out\base.apk" classes.dex

@@ -24,6 +24,7 @@
 
     <application
         android:label="Loop Player"
+        android:icon="@mipmap/ic_launcher"
         android:allowBackup="false"
         android:requestLegacyExternalStorage="true"
         android:theme="@android:style/Theme.Black.NoTitleBar.Fullscreen">
