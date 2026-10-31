@@ -51,6 +51,11 @@
   #now .label { font-size: 13px; color: var(--dim); }
   #now .title { font-size: 18px; font-weight: 600; overflow-wrap: anywhere; }
 
+  #skip { display: flex; gap: 8px; margin-top: 8px; }
+  #tags { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 12px; }
+  #tags button { min-height: 36px; border-radius: 18px; font-size: 15px; }
+  .tile .tagline { position: absolute; left: 6px; right: 6px; top: 36px; font-size: 11px; color: var(--accent);
+    text-shadow: 0 1px 2px #000; overflow-wrap: anywhere; }
   #grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 10px; }
   .tile { position: relative; border-radius: 10px; overflow: hidden; background: #000; border: 2px solid transparent; cursor: pointer; }
   .tile.in { border-color: var(--accent); }
@@ -107,17 +112,21 @@
     <div class="what">
       <div class="label" id="nowLabel">Now playing</div>
       <div class="title" id="nowTitle">…</div>
+      <div id="skip"><button id="prevBtn" class="small" aria-label="Previous video">◀◀ Back</button><button id="nextBtn" class="small" aria-label="Next video">Next ▶▶</button></div>
     </div>
     <button id="sleepBtn">Sleep</button>
   </section>
 
   <section>
-    <h2><span class="grow">Videos</span><button id="allBtn" class="small">All</button></h2>
-    <p class="hint">Tap videos to build the loop (the numbers are the order). ▶ loops just that one. All plays everything.</p>
+    <h2><span class="grow">Videos</span><button id="shuffleBtn" class="small">Shuffle</button><button id="allBtn" class="small">All</button></h2>
+    <div id="tags"></div>
+    <p class="hint">Tap a tag to loop everything with it (tap more to add theirs). Or tap videos to build the loop (the
+      numbers are the order). ▶ loops just that one. All plays everything.</p>
     <div id="grid"></div>
     <div class="row" style="margin-top: 12px">
       <label class="button upload" id="uploadLabel">+ Add videos<input type="file" id="file" multiple
         accept="video/mp4,video/webm,video/x-matroska,.mp4,.mkv,.webm"></label>
+      <button id="tagBtn">Tags…</button>
       <button id="editBtn">Delete…</button>
     </div>
     <p class="hint" id="noWrite" hidden>To add or delete videos from here, allow Loop Player to save files on the device
@@ -185,6 +194,7 @@ let state = null;       // the last answer from the sign
 let draft = null;       // the schedule being edited
 let draftDirty = false;
 let editing = false;    // delete mode
+let tagging = false;    // tag-editing mode
 let loggedOut = false;
 let dragging = false;   // a slider is being moved: don't overwrite it
 let pollTimer = 0;
@@ -253,8 +263,11 @@ $("#loginForm").addEventListener("submit", async (e) => {
 
 // ---- Rendering ----
 
-function inLoop(name) {
-  return state.all || state.selection.includes(name);
+const hasTag = (v, tags) => (v.tags || []).some((t) => tags.some((a) => a.toLowerCase() === t.toLowerCase()));
+
+function inLoop(v) {
+  if (state.activeTags.length) return hasTag(v, state.activeTags);
+  return state.all || state.selection.includes(v.name);
 }
 
 function render(s) {
@@ -275,6 +288,11 @@ function render(s) {
   $("#sleepBtn").className = s.asleep ? "primary" : "";
 
   $("#allBtn").className = "small" + (s.all ? " active" : "");
+  $("#shuffleBtn").className = "small" + (s.shuffle ? " active" : "");
+  $("#shuffleBtn").textContent = s.shuffle ? "⇄ Shuffle" : "Shuffle";
+  $("#tags").innerHTML = s.tags.map((t) =>
+    `<button class="${s.activeTags.some((a) => a.toLowerCase() === t.toLowerCase()) ? "active" : ""}" data-tag="${esc(t)}">${esc(t)}</button>`).join("");
+  $("#tags").hidden = !s.tags.length;
   renderGrid();
 
   $("#muteBtn").textContent = s.muted ? "Sound off" : "Sound on";
@@ -296,17 +314,19 @@ function render(s) {
   renderApps();
   $("#uploadLabel").hidden = !s.canWrite;
   $("#editBtn").hidden = !s.canWrite;
+  $("#tagBtn").hidden = !s.canWrite;
   $("#noWrite").hidden = s.canWrite;
 }
 
 function renderGrid() {
   const s = state;
   $("#grid").innerHTML = s.videos.map((v) => {
-    const order = s.all ? -1 : s.selection.indexOf(v.name);
-    const cls = "tile " + (inLoop(v.name) ? (s.all ? "" : "in") : "out");
+    const order = s.all || s.activeTags.length ? -1 : s.selection.indexOf(v.name);
+    const cls = "tile " + (inLoop(v) ? (s.all ? "" : "in") : "out");
     return `<div class="${cls}" data-name="${esc(v.name)}">
       <img loading="lazy" src="${esc(thumb(v))}" alt="">
       ${order >= 0 ? `<span class="badge">${order + 1}</span>` : ""}
+      ${tagging ? `<span class="tagline">${esc((v.tags || []).join(" · ") || "no tags")}</span>` : ""}
       ${v.name === s.playing ? `<span class="now">▶ NOW</span>` : ""}
       ${editing ? `<button class="del" data-del="${esc(v.name)}" aria-label="Delete">✕</button>`
                 : `<button class="solo" data-solo="${esc(v.name)}" aria-label="Loop only this">▶</button>`}
@@ -325,11 +345,16 @@ $("#grid").addEventListener("click", async (e) => {
     try { render(await api("DELETE", "video?name=" + encodeURIComponent(name))); } catch (err) { toast(err.message); }
   } else if (solo) {
     act("loop", { solo: solo.dataset.solo });
+  } else if (tile && tagging) {
+    const v = state.videos.find((x) => x.name === tile.dataset.name);
+    const answer = prompt("Tags for " + v.title + " (separate with commas)", (v.tags || []).join(", "));
+    if (answer !== null) act("tag", { name: v.name, tags: answer.split(",").map((t) => t.trim()).filter(Boolean) });
   } else if (tile && !editing) {
-    // Same rules as the swipe-up panel: from All, a tap starts a loop of just that one; the last one out means All.
+    // Same rules as the swipe-up panel: from All or a tag, a tap starts a loop of just that one; the last one out means All.
     const name = tile.dataset.name;
-    let names = state.all ? [] : state.selection.slice();
-    if (state.all) names = [name];
+    const fresh = state.all || state.activeTags.length > 0;
+    let names = fresh ? [] : state.selection.slice();
+    if (fresh) names = [name];
     else if (names.includes(name)) names = names.filter((n) => n !== name);
     else names.push(name);
     act("loop", names.length ? { names } : { all: true });
@@ -337,8 +362,30 @@ $("#grid").addEventListener("click", async (e) => {
 });
 
 $("#allBtn").onclick = () => act("loop", { all: true });
+$("#shuffleBtn").onclick = () => act("shuffle", { on: !state.shuffle });
+$("#prevBtn").onclick = () => act("skip", { dir: -1 });
+$("#nextBtn").onclick = () => act("skip", { dir: 1 });
+$("#tags").addEventListener("click", (e) => {
+  const b = e.target.closest("[data-tag]");
+  if (!b) return;
+  const tag = b.dataset.tag;
+  const on = state.activeTags.filter((a) => a.toLowerCase() !== tag.toLowerCase());
+  act("loop", on.length === state.activeTags.length ? { tags: [...on, tag] } : on.length ? { tags: on } : { all: true });
+});
+$("#tagBtn").onclick = () => {
+  tagging = !tagging;
+  editing = false;
+  $("#editBtn").textContent = "Delete…";
+  $("#editBtn").className = "";
+  $("#tagBtn").textContent = tagging ? "Done" : "Tags…";
+  $("#tagBtn").className = tagging ? "active" : "";
+  renderGrid();
+};
 $("#editBtn").onclick = () => {
   editing = !editing;
+  tagging = false;
+  $("#tagBtn").textContent = "Tags…";
+  $("#tagBtn").className = "";
   $("#editBtn").textContent = editing ? "Done" : "Delete…";
   $("#editBtn").className = editing ? "active" : "";
   renderGrid();

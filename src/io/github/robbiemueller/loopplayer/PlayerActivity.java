@@ -48,6 +48,7 @@ import java.util.Collections;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Random;
 import java.util.Set;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutionException;
@@ -57,14 +58,19 @@ import java.util.concurrent.TimeUnit;
 /**
  * Full-screen, control-free video loop for signage screens, old tablets and the like (Android 5.0+).
  *
- * Plays the videos in /sdcard/Movies/loop/ forever: all of them in name order, or the ones picked in the swipe-up
- * panel, in the order picked (a single video loops seamlessly inside the media player). Double-tap toggles the sound;
- * holding a finger down for 3 seconds opens the settings menu, where the phone remote can be turned on.
+ * Plays the videos in /sdcard/Movies/loop/ forever: all of them in name order, the ones with chosen tags (see
+ * {@link Tags}), or the ones picked in the swipe-up panel, in the order picked (a single video loops seamlessly inside
+ * the media player). Shuffle plays the loop in a fresh random order each time round. Swipe left for the next video,
+ * right for the one before. Double-tap toggles the sound; holding a finger down for 3 seconds opens the settings
+ * menu, where the phone remote can be turned on.
  * From a computer: adb shell am start -n io.github.robbiemueller.loopplayer/.PlayerActivity with
  *   --ez reload true           rescan the folder
  *   --es play name.mp4         loop just that video
  *   --es playlist a.mp4,b.mp4  loop these, in this order
+ *   --es tags Halloween,Music  loop every video with any of these tags
  *   --ez all true              loop everything in the folder
+ *   --ez shuffle true          random order (false: in order)
+ *   --ez next true             skip to the next video (previous true: back one)
  *   --ez mute true             sound off (false: on)
  *   --ez fill true             crop to fill the screen (false: fit the whole video)
  *   --ez home true             use as the home screen (false: stop)
@@ -95,9 +101,18 @@ public class PlayerActivity extends Activity implements VideoPicker.Listener {
     private Schedule schedule;
     private List<File> library = new ArrayList<>();
     private List<File> playlist = new ArrayList<>();
+    /** The playlist in the order it plays: as is, or shuffled once per time round. */
+    private List<File> queue = new ArrayList<>();
+    /** What played before, for swiping back; newest last. */
+    private final List<File> history = new ArrayList<>();
     private File current;
     private boolean allMode;
     private List<String> selection = new ArrayList<>();
+    private Tags tags = new Tags();
+    /** Non-empty: loop every video with any of these tags (this wins over All and the picks). */
+    private Set<String> activeTags = new LinkedHashSet<>();
+    private boolean shuffle;
+    private final Random random = new Random();
     private boolean muted;
     private boolean fill;
     private boolean asleep;
@@ -142,6 +157,9 @@ public class PlayerActivity extends Activity implements VideoPicker.Listener {
         schedule = Schedule.load(prefs.getString("schedule", ""));
         String saved = prefs.getString("selection", "");
         if (!saved.isEmpty()) selection = new ArrayList<>(Arrays.asList(saved.split("\n")));
+        String savedTags = prefs.getString("tags", "");
+        if (!savedTags.isEmpty()) activeTags = new LinkedHashSet<>(Arrays.asList(savedTags.split("\n")));
+        shuffle = prefs.getBoolean("shuffle", false);
         thumbnails = new Thumbnails(new File(getCacheDir(), "thumbs"));
 
         FrameLayout root = new FrameLayout(this);
@@ -188,9 +206,15 @@ public class PlayerActivity extends Activity implements VideoPicker.Listener {
             @Override
             public boolean onFling(MotionEvent e1, MotionEvent e2, float vx, float vy) {
                 if (e1 == null || e2 == null) return false;
+                float dx = e2.getX() - e1.getX();
                 float dy = e2.getY() - e1.getY();
-                if (dy < -100 * density && vy < -600 && Math.abs(dy) > Math.abs(e2.getX() - e1.getX())) {
+                if (dy < -100 * density && vy < -600 && Math.abs(dy) > Math.abs(dx)) {
                     openPicker();
+                    return true;
+                }
+                // Sideways: left for the next video, right for the one before.
+                if (Math.abs(dx) > 80 * density && Math.abs(vx) > 500 && Math.abs(dx) > Math.abs(dy) * 1.5f) {
+                    skip(dx < 0 ? 1 : -1);
                     return true;
                 }
                 return false;
@@ -292,10 +316,18 @@ public class PlayerActivity extends Activity implements VideoPicker.Listener {
         // Any app can send this activity an intent, so intents may only turn the remote off, never on.
         if (intent.hasExtra("remote") && !intent.getBooleanExtra("remote", true)) setRemote(false);
         if (intent.hasExtra("sleep")) setAsleep(intent.getBooleanExtra("sleep", false));
+        if (intent.hasExtra("shuffle")) setShuffle(intent.getBooleanExtra("shuffle", false));
         if (intent.getBooleanExtra("all", false)) {
             saveSelection(new ArrayList<String>(), true);
             restart = true;
         }
+        String tagList = intent.getStringExtra("tags");
+        if (!TextUtils.isEmpty(tagList)) {
+            saveTags(new LinkedHashSet<>(Arrays.asList(tagList.split(","))));
+            restart = true;
+        }
+        if (!restart && intent.getBooleanExtra("next", false)) skip(1);
+        if (!restart && intent.getBooleanExtra("previous", false)) skip(-1);
         String play = intent.getStringExtra("play");
         if (!TextUtils.isEmpty(play)) {
             saveSelection(new ArrayList<>(Arrays.asList(play)), false);
@@ -379,6 +411,7 @@ public class PlayerActivity extends Activity implements VideoPicker.Listener {
     private void scanLibrary() {
         File[] files = folder().listFiles();
         library = new ArrayList<>();
+        tags = Tags.load(new File(folder(), Tags.FILE_NAME));
         if (files == null) return;
         Arrays.sort(files);
         for (File f : files) {
@@ -386,13 +419,26 @@ public class PlayerActivity extends Activity implements VideoPicker.Listener {
         }
     }
 
+    /** Tag mode is on and at least one video on disk has one of the tags. */
+    private boolean tagMode() {
+        return !activeTags.isEmpty() && tags.count(library, activeTags) > 0;
+    }
+
     private static boolean isVideoName(String name) {
         String n = name.toLowerCase(Locale.US);
         return !n.startsWith(".") && (n.endsWith(".mp4") || n.endsWith(".mkv") || n.endsWith(".webm"));
     }
 
-    /** The loop: every video when in "all" mode (or when none of the picked ones exist), else the picked ones. */
+    /** The loop: the tagged videos in tag mode; every video in "all" mode (or when none of the picked ones exist);
+     *  else the picked ones. */
     private List<File> buildPlaylist() {
+        if (tagMode()) {
+            List<File> tagged = new ArrayList<>();
+            for (File f : library) {
+                if (tags.matches(f.getName(), activeTags)) tagged.add(f);
+            }
+            return tagged;
+        }
         if (allMode) return new ArrayList<>(library);
         List<File> picked = new ArrayList<>();
         for (String name : selection) {
@@ -413,13 +459,75 @@ public class PlayerActivity extends Activity implements VideoPicker.Listener {
             return;
         }
         notice.setVisibility(View.GONE);
-        play(playlist.get(0));
+        queue = makeQueue(null);
+        history.clear();
+        play(queue.get(0));
+    }
+
+    /** The playlist in playing order. Shuffled, with {@code first} (if it's in the loop) kept at the front so the
+     *  video on screen carries on and the rest follow in a new random order. */
+    private List<File> makeQueue(File first) {
+        List<File> q = new ArrayList<>(playlist);
+        if (shuffle) {
+            Collections.shuffle(q, random);
+            if (first != null && q.remove(first)) q.add(0, first);
+        }
+        return q;
+    }
+
+    /** After the loop changed: a new queue, and switch videos only if the one on screen left the loop. */
+    private void loopChanged() {
+        playlist = buildPlaylist();
+        if (playlist.isEmpty()) return;
+        boolean keep = current != null && playlist.contains(current);
+        queue = makeQueue(keep ? current : null);
+        if (keep) {
+            updateLooping();
+        } else {
+            play(queue.get(0));
+        }
     }
 
     private void playNext() {
-        if (playlist.isEmpty()) return;
-        int at = playlist.indexOf(current);
-        play(playlist.get(at < 0 ? 0 : (at + 1) % playlist.size()));
+        if (queue.isEmpty()) return;
+        remember(current);
+        int at = queue.indexOf(current);
+        if (at + 1 >= queue.size() && shuffle && queue.size() > 1) {
+            // Round again in a new order, without repeating the video that just played.
+            queue = makeQueue(null);
+            if (queue.get(0).equals(current)) Collections.swap(queue, 0, 1 + random.nextInt(queue.size() - 1));
+            play(queue.get(0));
+            return;
+        }
+        play(queue.get(at < 0 ? 0 : (at + 1) % queue.size()));
+    }
+
+    /** Swipes and the remote: +1 skips ahead, -1 goes back to what played before. */
+    private void skip(int dir) {
+        if (queue.isEmpty() || asleep) return;
+        if (dir > 0) {
+            playNext();
+        } else {
+            File back = null;
+            while (back == null && !history.isEmpty()) {
+                File f = history.remove(history.size() - 1);
+                if (f.isFile() && !f.equals(current)) back = f;
+            }
+            if (back == null) {
+                // Nothing played before this: step back through the queue instead.
+                int at = queue.indexOf(current);
+                back = queue.get(at <= 0 ? queue.size() - 1 : at - 1);
+            }
+            play(back);
+            updateLooping();
+        }
+        if (current != null) showNotice((dir > 0 ? "▶▶  " : "◀◀  ") + VideoPicker.displayName(current.getName()));
+    }
+
+    private void remember(File f) {
+        if (f == null) return;
+        history.add(f);
+        if (history.size() > 50) history.remove(0);
     }
 
     private void play(File f) {
@@ -438,24 +546,51 @@ public class PlayerActivity extends Activity implements VideoPicker.Listener {
         }
     }
 
+    /** All or hand-picked videos; this leaves tag mode. */
     private void saveSelection(List<String> names, boolean all) {
         allMode = all;
         selection = names;
-        prefs.edit().putBoolean("all", all).putString("selection", TextUtils.join("\n", names)).apply();
+        activeTags = new LinkedHashSet<>();
+        prefs.edit().putBoolean("all", all).putString("selection", TextUtils.join("\n", names))
+                .putString("tags", "").apply();
+    }
+
+    /** Tag mode: every video with any of these tags. An empty set goes back to All. */
+    private void saveTags(Set<String> wanted) {
+        Set<String> clean = new LinkedHashSet<>();
+        for (String t : wanted) {
+            if (!t.trim().isEmpty()) clean.add(t.trim());
+        }
+        if (clean.isEmpty()) {
+            saveSelection(new ArrayList<String>(), true);
+            return;
+        }
+        activeTags = clean;
+        allMode = false;
+        selection = new ArrayList<>();
+        prefs.edit().putBoolean("all", false).putString("selection", "")
+                .putString("tags", TextUtils.join("\n", clean)).apply();
+    }
+
+    private void setShuffle(boolean value) {
+        shuffle = value;
+        prefs.edit().putBoolean("shuffle", shuffle).apply();
+        queue = makeQueue(current);
     }
 
     private void openPicker() {
         handler.removeCallbacks(openMenuAfterHold);
         scanLibrary();
-        picker.setLibrary(library, effectiveSelection(), allMode || effectiveSelection().isEmpty(),
-                current == null ? null : current.getName());
+        boolean byTag = tagMode();
+        picker.setLibrary(library, effectiveSelection(), !byTag && (allMode || effectiveSelection().isEmpty()),
+                current == null ? null : current.getName(), tags, byTag ? activeTags : new LinkedHashSet<String>(), shuffle);
         picker.open();
     }
 
     /** The picks that still exist on disk, in order; none left means everything plays. */
     private List<String> effectiveSelection() {
         List<String> existing = new ArrayList<>();
-        if (allMode) return existing;
+        if (allMode || tagMode()) return existing;
         for (File f : buildPlaylist()) {
             if (selection.contains(f.getName())) existing.add(f.getName());
         }
@@ -465,26 +600,26 @@ public class PlayerActivity extends Activity implements VideoPicker.Listener {
     @Override
     public void onSelectionChanged(List<String> selected, boolean all) {
         saveSelection(selected, all);
-        playlist = buildPlaylist();
-        if (playlist.isEmpty()) return;
-        if (current == null || !playlist.contains(current)) {
-            // What's on screen was taken out of the loop: switch to the first pick right away.
-            play(playlist.get(0));
-        } else {
-            updateLooping();
-        }
+        // What's on screen keeps playing if it's still in the loop; if not, the loop starts right away.
+        loopChanged();
+    }
+
+    @Override
+    public void onTagsChanged(List<String> wanted) {
+        saveTags(new LinkedHashSet<>(wanted));
+        loopChanged();
+    }
+
+    @Override
+    public void onShuffleChanged(boolean value) {
+        setShuffle(value);
+        if (!asleep) showNotice(value ? "Shuffle: on" : "In order");
     }
 
     @Override
     public void onSolo(String name) {
         saveSelection(new ArrayList<>(Arrays.asList(name)), false);
-        playlist = buildPlaylist();
-        if (playlist.isEmpty()) return;
-        if (playlist.get(0).equals(current)) {
-            updateLooping();
-        } else {
-            play(playlist.get(0));
-        }
+        loopChanged();
         if (!asleep) showNotice("Looping " + VideoPicker.displayName(name));
     }
 
@@ -496,13 +631,10 @@ public class PlayerActivity extends Activity implements VideoPicker.Listener {
     /** After files were added or removed: rescan, and move on if what's on screen is gone. */
     private void libraryChanged() {
         scanLibrary();
-        playlist = buildPlaylist();
-        if (playlist.isEmpty()) {
+        if (buildPlaylist().isEmpty()) {
             startPlaylist();
-        } else if (current == null || !playlist.contains(current)) {
-            play(playlist.get(0));
         } else {
-            updateLooping();
+            loopChanged();
         }
         if (picker.isOpen()) openPicker();
     }
@@ -715,8 +847,10 @@ public class PlayerActivity extends Activity implements VideoPicker.Listener {
                     JSONArray videos = new JSONArray();
                     for (File f : library) {
                         videos.put(new JSONObject().put("name", f.getName()).put("title", VideoPicker.displayName(f.getName()))
-                                .put("size", f.length()).put("modified", f.lastModified()));
+                                .put("size", f.length()).put("modified", f.lastModified())
+                                .put("tags", new JSONArray(tags.of(f.getName()))));
                     }
+                    boolean byTag = tagMode();
                     JSONArray apps = new JSONArray();
                     Intent launcher = new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER);
                     for (ResolveInfo r : getPackageManager().queryIntentActivities(launcher, 0)) {
@@ -731,8 +865,11 @@ public class PlayerActivity extends Activity implements VideoPicker.Listener {
                             .put("inFront", inFront)
                             .put("asleep", asleep)
                             .put("playing", current == null ? JSONObject.NULL : current.getName())
-                            .put("all", allMode || effectiveSelection().isEmpty())
+                            .put("all", !byTag && (allMode || effectiveSelection().isEmpty()))
                             .put("selection", new JSONArray(effectiveSelection()))
+                            .put("tags", new JSONArray(tags.present(library)))
+                            .put("activeTags", new JSONArray(byTag ? new ArrayList<>(activeTags) : new ArrayList<String>()))
+                            .put("shuffle", shuffle)
                             .put("videos", videos)
                             .put("muted", muted)
                             .put("volume", audio.getStreamVolume(AudioManager.STREAM_MUSIC))
@@ -756,6 +893,11 @@ public class PlayerActivity extends Activity implements VideoPicker.Listener {
                         case "loop":
                             if (body.optBoolean("all", false)) {
                                 onSelectionChanged(new ArrayList<String>(), true);
+                            } else if (body.has("tags")) {
+                                JSONArray wanted = body.getJSONArray("tags");
+                                List<String> list = new ArrayList<>();
+                                for (int i = 0; i < wanted.length(); i++) list.add(wanted.getString(i));
+                                onTagsChanged(list);
                             } else if (body.has("solo")) {
                                 videoFile(body.getString("solo"));
                                 onSolo(body.getString("solo"));
@@ -767,6 +909,32 @@ public class PlayerActivity extends Activity implements VideoPicker.Listener {
                             }
                             if (picker.isOpen()) openPicker();
                             break;
+                        case "shuffle":
+                            setShuffle(body.getBoolean("on"));
+                            if (picker.isOpen()) openPicker();
+                            break;
+                        case "skip":
+                            skip(body.optInt("dir", 1) < 0 ? -1 : 1);
+                            break;
+                        case "tag": {
+                            String video = body.getString("name");
+                            videoFile(video);
+                            JSONArray list = body.getJSONArray("tags");
+                            List<String> names = new ArrayList<>();
+                            for (int i = 0; i < list.length(); i++) names.add(list.getString(i));
+                            scanLibrary();
+                            tags.set(video, names);
+                            try {
+                                tags.save(new File(folder(), Tags.FILE_NAME));
+                            } catch (IOException e) {
+                                if (needsWritePermission()) {
+                                    throw new IllegalArgumentException("Loop Player isn't allowed to save files: allow storage access on the device");
+                                }
+                                throw e;
+                            }
+                            libraryChanged();
+                            break;
+                        }
                         case "sound":
                             if (body.has("muted")) setMuted(body.getBoolean("muted"));
                             if (body.has("volume")) {

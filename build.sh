@@ -6,8 +6,8 @@
 #   ./build.sh --install     build, install over ADB and start it
 #   KEYSTORE=my.keystore STOREPASS=secret ./build.sh
 set -euo pipefail
-VERSION_CODE=4
-VERSION_NAME=1.3.0
+VERSION_CODE=5
+VERSION_NAME=1.4.0
 TARGET_SDK=35
 
 SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"

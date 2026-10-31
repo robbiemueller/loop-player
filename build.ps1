@@ -6,8 +6,8 @@
 # Keep your keystore: Android only installs an update signed with the same key as the installed app.
 param([switch]$Install, [string]$Keystore, [string]$StorePass = 'loopplayer')
 $ErrorActionPreference = 'Stop'
-$versionCode = 4
-$versionName = '1.3.0'
+$versionCode = 5
+$versionName = '1.4.0'
 $targetSdk = 35
 
 $sdk = if ($env:ANDROID_HOME) { $env:ANDROID_HOME } else { "$env:LOCALAPPDATA\Android\Sdk" }

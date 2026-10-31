@@ -33,13 +33,18 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 /**
- * The swipe-up panel for choosing what loops. Tap a video to add it to (or take it out of) the loop, in the order
- * tapped; hold a video to loop just that one; "All" loops everything, including videos added later.
+ * The swipe-up panel for choosing what loops. Tap a tag to loop every video with it (tap more tags to add theirs);
+ * tap a video to add it to (or take it out of) the loop, in the order tapped; hold a video to loop just that one;
+ * "All" loops everything, including videos added later; "Shuffle" plays the loop in random order.
  * Changes apply immediately; the panel only reports them through {@link Listener}.
  */
 public class VideoPicker extends FrameLayout {
     public interface Listener {
         void onSelectionChanged(List<String> selected, boolean all);
+
+        void onTagsChanged(List<String> tags);
+
+        void onShuffleChanged(boolean shuffle);
 
         void onSolo(String name);
 
@@ -63,12 +68,18 @@ public class VideoPicker extends FrameLayout {
     private final GridView grid;
     private final TextView status;
     private final TextView allButton;
+    private final TextView shuffleButton;
+    private final LinearLayout chips;
+    private final View chipScroller;
     private final Adapter adapter = new Adapter();
     private final Thumbnails thumbnails;
 
     private List<File> library = new ArrayList<>();
     private final List<String> selected = new ArrayList<>();
     private boolean all = true;
+    private Tags tags = new Tags();
+    private final List<String> activeTags = new ArrayList<>();
+    private boolean shuffle;
     private String nowPlaying;
     private boolean open;
 
@@ -127,7 +138,21 @@ public class VideoPicker extends FrameLayout {
                 setAll();
             }
         });
-        header.addView(allButton);
+        shuffleButton = button(context, "Shuffle");
+        shuffleButton.setOnClickListener(new OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                bumpAutoClose();
+                shuffle = !shuffle;
+                updateStatus();
+                listener.onShuffleChanged(shuffle);
+            }
+        });
+        header.addView(shuffleButton);
+        LinearLayout.LayoutParams allParams = new LinearLayout.LayoutParams(
+                LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT);
+        allParams.leftMargin = dp(10);
+        header.addView(allButton, allParams);
         TextView done = button(context, "Done");
         done.setOnClickListener(new OnClickListener() {
             @Override
@@ -141,7 +166,20 @@ public class VideoPicker extends FrameLayout {
         header.addView(done, doneParams);
         sheet.addView(header);
 
-        TextView hint = text(context, "Tap to add to the loop  ·  Hold to loop just one", 14, Color.argb(0xb0, 0xff, 0xff, 0xff));
+        // A row of tag buttons, scrolling sideways when there are many.
+        chips = new LinearLayout(context);
+        chips.setOrientation(LinearLayout.HORIZONTAL);
+        android.widget.HorizontalScrollView scroller = new android.widget.HorizontalScrollView(context);
+        scroller.setHorizontalScrollBarEnabled(false);
+        scroller.addView(chips);
+        chipScroller = scroller;
+        LinearLayout.LayoutParams chipParams = new LinearLayout.LayoutParams(
+                LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT);
+        chipParams.topMargin = dp(10);
+        sheet.addView(scroller, chipParams);
+
+        TextView hint = text(context, "Tap a tag or videos to build the loop  ·  Hold a video to loop just it",
+                14, Color.argb(0xb0, 0xff, 0xff, 0xff));
         hint.setPadding(0, dp(6), 0, dp(4));
         sheet.addView(hint);
         status = text(context, "", 15, ACCENT);
@@ -206,17 +244,67 @@ public class VideoPicker extends FrameLayout {
         return open;
     }
 
-    /** Fills the panel: the files on disk, the current loop, and what's on screen right now. */
-    public void setLibrary(List<File> files, List<String> selectedNames, boolean allMode, String playing) {
+    /** Fills the panel: the files on disk, the current loop (picks, All or tags), and what's on screen right now. */
+    public void setLibrary(List<File> files, List<String> selectedNames, boolean allMode, String playing,
+                           Tags videoTags, java.util.Set<String> loopTags, boolean shuffled) {
         library = new ArrayList<>(files);
         selected.clear();
         selected.addAll(selectedNames);
         all = allMode;
         nowPlaying = playing;
+        tags = videoTags;
+        activeTags.clear();
+        activeTags.addAll(loopTags);
+        shuffle = shuffled;
         int widthDp = (int) (getResources().getDisplayMetrics().widthPixels / density);
         grid.setNumColumns(Math.max(2, widthDp / 260));
+        buildChips();
         adapter.notifyDataSetChanged();
         updateStatus();
+    }
+
+    private void buildChips() {
+        chips.removeAllViews();
+        List<String> present = tags.present(library);
+        chipScroller.setVisibility(present.isEmpty() ? GONE : VISIBLE);
+        for (final String tag : present) {
+            TextView chip = button(getContext(), tag);
+            chip.setTextSize(16);
+            chip.setPadding(dp(16), dp(7), dp(16), dp(7));
+            boolean on = Tags.indexOf(activeTags, tag) >= 0;
+            GradientDrawable bg = new GradientDrawable();
+            bg.setColor(on ? ACCENT : Color.argb(0x30, 0xff, 0xff, 0xff));
+            bg.setCornerRadius(dp(20));
+            chip.setBackground(bg);
+            chip.setTextColor(on ? Color.BLACK : Color.WHITE);
+            chip.setOnClickListener(new OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    toggleTag(tag);
+                }
+            });
+            LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT);
+            p.rightMargin = dp(8);
+            chips.addView(chip, p);
+        }
+    }
+
+    private void toggleTag(String tag) {
+        bumpAutoClose();
+        int at = Tags.indexOf(activeTags, tag);
+        if (at >= 0) activeTags.remove(at);
+        else activeTags.add(tag);
+        selected.clear();
+        all = activeTags.isEmpty();
+        buildChips();
+        adapter.notifyDataSetChanged();
+        updateStatus();
+        if (all) listener.onSelectionChanged(new ArrayList<String>(), true);
+        else listener.onTagsChanged(new ArrayList<>(activeTags));
+    }
+
+    private boolean tagMode() {
+        return !activeTags.isEmpty();
     }
 
     public void setNowPlaying(String playing) {
@@ -264,9 +352,11 @@ public class VideoPicker extends FrameLayout {
 
     private void toggle(String name) {
         bumpAutoClose();
-        if (all) {
-            // Leaving "All": the first tap starts a hand-picked loop with just that video.
+        if (all || tagMode()) {
+            // Leaving "All" or the tags: the first tap starts a hand-picked loop with just that video.
             all = false;
+            activeTags.clear();
+            buildChips();
             selected.clear();
             selected.add(name);
         } else if (selected.contains(name)) {
@@ -284,21 +374,33 @@ public class VideoPicker extends FrameLayout {
         bumpAutoClose();
         all = true;
         selected.clear();
+        activeTags.clear();
+        buildChips();
         adapter.notifyDataSetChanged();
         updateStatus();
         listener.onSelectionChanged(new ArrayList<String>(), true);
     }
 
     private void updateStatus() {
-        int n = all ? library.size() : selected.size();
-        if (all) {
-            status.setText(String.format(Locale.US, "Looping all %d videos", n));
-        } else if (n == 1) {
+        String order = shuffle ? ", shuffled" : ", in order";
+        if (tagMode()) {
+            int n = tags.count(library, new java.util.LinkedHashSet<>(activeTags));
+            status.setText(String.format(Locale.US, "Looping %d %s video%s%s", n, android.text.TextUtils.join(" + ", activeTags),
+                    n == 1 ? "" : "s", n == 1 ? "" : order));
+        } else if (all) {
+            status.setText(String.format(Locale.US, "Looping all %d videos%s", library.size(), order));
+        } else if (selected.size() == 1) {
             status.setText("Looping one video over and over");
         } else {
-            status.setText(String.format(Locale.US, "Looping %d videos back to back", n));
+            status.setText(String.format(Locale.US, "Looping %d videos back to back%s", selected.size(), order));
         }
         allButton.setAlpha(all ? 0.4f : 1f);
+        GradientDrawable bg = new GradientDrawable();
+        bg.setColor(shuffle ? ACCENT : Color.argb(0x40, 0xff, 0xff, 0xff));
+        bg.setCornerRadius(dp(20));
+        shuffleButton.setBackground(bg);
+        shuffleButton.setTextColor(shuffle ? Color.BLACK : Color.WHITE);
+        shuffleButton.setText(shuffle ? "⇄ Shuffle" : "Shuffle");
     }
 
     private int dp(float v) {
@@ -354,7 +456,8 @@ public class VideoPicker extends FrameLayout {
             File f = library.get(position);
             int columns = Math.max(1, grid.getNumColumns());
             int width = (grid.getWidth() - grid.getPaddingLeft() - grid.getPaddingRight() - dp(10) * (columns - 1)) / columns;
-            tile.bind(f, all ? -1 : selected.indexOf(f.getName()), all, f.getName().equals(nowPlaying), width);
+            boolean everyone = all || (tagMode() && tags.matches(f.getName(), activeTags));
+            tile.bind(f, everyone ? -1 : selected.indexOf(f.getName()), everyone, f.getName().equals(nowPlaying), width);
             return tile;
         }
     }

@@ -47,7 +47,8 @@ import java.util.concurrent.Executors;
  *   POST   /api/login {"pin"}     check the PIN, set the session cookie
  *   GET    /api/state             what's playing, the library, sound, screen and schedule
  *   GET    /api/thumb?name=       a video's thumbnail (JPEG)
- *   POST   /api/<action> {...}    loop, sound, screen, schedule, reload, open; answers with the new state
+ *   POST   /api/<action> {...}    loop, shuffle, skip, tag, sound, screen, schedule, reload, open; answers with the
+ *                                 new state
  *   PUT    /api/video?name=       upload a video (the request body is the file)
  *   DELETE /api/video?name=       delete a video
  */

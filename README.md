@@ -16,8 +16,14 @@ but nothing in it is specific to that device.
     tapping three videos plays them back to back in that order.
   - **Hold** a video to loop just that one (the panel closes and it starts at once).
   - **All** loops every video in the folder, including ones added later.
+  - **Tags** (the row of buttons under the header, if your videos have tags): tap one to loop every video with that
+    tag, including ones tagged later. Tap more to add them; tap All to go back to everything. See
+    [Tags](#tags) for how to set them.
+  - **Shuffle** plays the loop in a random order, reshuffled each time round (without the same video twice in a
+    row). Off plays it in order.
   - Swipe down, tap above the panel or press Back to close it; it also closes by itself after 30 seconds. Unchosen
     videos are greyed out, and the one playing now is marked. The choice is remembered across restarts.
+- **Swipe left** to skip to the next video, **swipe right** to go back to the one before.
 - **Double-tap:** sound off/on. It's remembered across restarts.
 - **Hold a finger down for 3 seconds:** opens the menu.
   - **Choose videos** (the same panel as swiping up)
@@ -36,7 +42,9 @@ but nothing in it is specific to that device.
 Turn on **Phone remote** in the hold menu. The screen shows an address such as `http://192.168.1.50:8080` and a
 6-digit PIN. Open the address in your phone's browser on the same Wi-Fi, enter the PIN once, and you can:
 
-- pick what loops (tap to build the loop, ▶ to loop one, **All**), with the same rules as the swipe-up panel
+- pick what loops (tap to build the loop, ▶ to loop one, **All**, tags, **Shuffle**), with the same rules as the
+  swipe-up panel, and skip back or forward
+- **tag** videos (Tags… then tap a video)
 - turn the sound on or off and set the volume
 - set the brightness, fit or fill, and put the screen to **sleep** or wake it
 - **add videos** from your phone, or delete them
@@ -72,6 +80,26 @@ Good to know:
    ```
 4. Hold 3 s → **Reload videos** (or restart the app).
 
+## Tags
+
+Tags group videos so you can loop a set (say, everything for Halloween) without picking them one by one. They live
+in `tags.json` next to the videos in `Movies/loop/`:
+
+```json
+{
+  "order": ["Halloween", "Christmas", "Music"],
+  "videos": {
+    "pumpkins.mp4": ["Halloween"],
+    "carols.mp4": ["Christmas", "Music"]
+  }
+}
+```
+
+`order` sets the order of the tag buttons; tags not listed come after, most-used first. A video can have any number
+of tags, and tags match regardless of case. Edit the file on a computer and push it with
+`adb push tags.json /sdcard/Movies/loop/`, then reload, or tag videos from the phone remote (which writes the same
+file). Videos without tags still play under **All**.
+
 ## Remote control over ADB
 
 ```sh
@@ -79,6 +107,10 @@ adb shell am start -n io.github.robbiemueller.loopplayer/.PlayerActivity --ez re
 adb shell am start -n io.github.robbiemueller.loopplayer/.PlayerActivity --es play intro.mp4        # loop just this one
 adb shell am start -n io.github.robbiemueller.loopplayer/.PlayerActivity --es playlist "a.mp4,b.mp4"  # these, in order
 adb shell am start -n io.github.robbiemueller.loopplayer/.PlayerActivity --ez all true      # every video
+adb shell am start -n io.github.robbiemueller.loopplayer/.PlayerActivity --es tags "Halloween,Music"  # these tags
+adb shell am start -n io.github.robbiemueller.loopplayer/.PlayerActivity --ez shuffle true  # or false (in order)
+adb shell am start -n io.github.robbiemueller.loopplayer/.PlayerActivity --ez next true     # skip ahead
+adb shell am start -n io.github.robbiemueller.loopplayer/.PlayerActivity --ez previous true # back one
 adb shell am start -n io.github.robbiemueller.loopplayer/.PlayerActivity --ez mute true     # or false
 adb shell am start -n io.github.robbiemueller.loopplayer/.PlayerActivity --ez fill true     # or false (fit)
 adb shell am start -n io.github.robbiemueller.loopplayer/.PlayerActivity --ez home true     # or false
@@ -107,7 +139,8 @@ on anything that changes something, e.g.
 On an FYD-835S (Rockchip RK3126, Android 6.0.1), we tested:
 - the permission prompt
 - playback and seamless looping
-- the swipe-up picker (tap to add or remove, hold to loop one, All, swipe down to close)
+- the swipe-up picker (tap to add or remove, hold to loop one, All, tags, Shuffle, swipe down to close)
+- swiping left and right to skip ahead and back
 - the phone remote: PIN, sessions and lockout, picking videos, sound, brightness, sleep and wake, uploading and
   deleting
 - the schedule (sleep, wake, brightness and loop changes firing at their times)
