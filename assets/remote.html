@@ -320,7 +320,9 @@ function render(s) {
 
 function renderGrid() {
   const s = state;
-  $("#grid").innerHTML = s.videos.map((v) => {
+  // While tags are on, show only their videos (but every video when tagging or deleting).
+  const shown = tagging || editing || !s.activeTags.length ? s.videos : s.videos.filter((v) => hasTag(v, s.activeTags));
+  $("#grid").innerHTML = shown.map((v) => {
     const order = s.all || s.activeTags.length ? -1 : s.selection.indexOf(v.name);
     const cls = "tile " + (inLoop(v) ? (s.all ? "" : "in") : "out");
     return `<div class="${cls}" data-name="${esc(v.name)}">

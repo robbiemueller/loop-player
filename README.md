@@ -17,8 +17,8 @@ but nothing in it is specific to that device.
   - **Hold** a video to loop just that one (the panel closes and it starts at once).
   - **All** loops every video in the folder, including ones added later.
   - **Tags** (the row of buttons under the header, if your videos have tags): tap one to loop every video with that
-    tag, including ones tagged later. Tap more to add them; tap All to go back to everything. See
-    [Tags](#tags) for how to set them.
+    tag, including ones tagged later, and the panel shows just those. Tap more to add them; tap All to go back to
+    everything. See [Tags](#tags) for how to set them.
   - **Shuffle** plays the loop in a random order, reshuffled each time round (without the same video twice in a
     row). Off plays it in order.
   - Swipe down, tap above the panel or press Back to close it; it also closes by itself after 30 seconds. Unchosen

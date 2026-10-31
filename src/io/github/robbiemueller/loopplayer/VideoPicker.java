@@ -75,6 +75,8 @@ public class VideoPicker extends FrameLayout {
     private final Thumbnails thumbnails;
 
     private List<File> library = new ArrayList<>();
+    /** The tiles on show: the whole library, or only the videos with the chosen tags while tags are on. */
+    private List<File> shown = new ArrayList<>();
     private final List<String> selected = new ArrayList<>();
     private boolean all = true;
     private Tags tags = new Tags();
@@ -195,13 +197,13 @@ public class VideoPicker extends FrameLayout {
         grid.setOnItemClickListener(new AdapterView.OnItemClickListener() {
             @Override
             public void onItemClick(AdapterView<?> parent, View view, int position, long id) {
-                toggle(library.get(position).getName());
+                toggle(shown.get(position).getName());
             }
         });
         grid.setOnItemLongClickListener(new AdapterView.OnItemLongClickListener() {
             @Override
             public boolean onItemLongClick(AdapterView<?> parent, View view, int position, long id) {
-                String name = library.get(position).getName();
+                String name = shown.get(position).getName();
                 all = false;
                 selected.clear();
                 selected.add(name);
@@ -259,8 +261,31 @@ public class VideoPicker extends FrameLayout {
         int widthDp = (int) (getResources().getDisplayMetrics().widthPixels / density);
         grid.setNumColumns(Math.max(2, widthDp / 260));
         buildChips();
-        adapter.notifyDataSetChanged();
+        filter();
         updateStatus();
+    }
+
+    /** Picks the tiles to show, and goes back to the top when that changes. */
+    private void filter() {
+        List<File> was = shown;
+        if (tagMode()) {
+            shown = new ArrayList<>();
+            for (File f : library) {
+                if (tags.matches(f.getName(), activeTags)) shown.add(f);
+            }
+        } else {
+            shown = library;
+        }
+        adapter.notifyDataSetChanged();
+        if (!shown.equals(was)) {
+            // After the grid has laid out the new tiles, or it keeps its old scroll position.
+            grid.post(new Runnable() {
+                @Override
+                public void run() {
+                    grid.setSelection(0);
+                }
+            });
+        }
     }
 
     private void buildChips() {
@@ -297,7 +322,7 @@ public class VideoPicker extends FrameLayout {
         selected.clear();
         all = activeTags.isEmpty();
         buildChips();
-        adapter.notifyDataSetChanged();
+        filter();
         updateStatus();
         if (all) listener.onSelectionChanged(new ArrayList<String>(), true);
         else listener.onTagsChanged(new ArrayList<>(activeTags));
@@ -365,7 +390,7 @@ public class VideoPicker extends FrameLayout {
         } else {
             selected.add(name);
         }
-        adapter.notifyDataSetChanged();
+        filter();
         updateStatus();
         listener.onSelectionChanged(new ArrayList<>(selected), all);
     }
@@ -376,7 +401,7 @@ public class VideoPicker extends FrameLayout {
         selected.clear();
         activeTags.clear();
         buildChips();
-        adapter.notifyDataSetChanged();
+        filter();
         updateStatus();
         listener.onSelectionChanged(new ArrayList<String>(), true);
     }
@@ -437,12 +462,12 @@ public class VideoPicker extends FrameLayout {
     private class Adapter extends BaseAdapter {
         @Override
         public int getCount() {
-            return library.size();
+            return shown.size();
         }
 
         @Override
         public Object getItem(int position) {
-            return library.get(position);
+            return shown.get(position);
         }
 
         @Override
@@ -453,7 +478,7 @@ public class VideoPicker extends FrameLayout {
         @Override
         public View getView(int position, View convertView, ViewGroup parent) {
             Tile tile = convertView instanceof Tile ? (Tile) convertView : new Tile(getContext());
-            File f = library.get(position);
+            File f = shown.get(position);
             int columns = Math.max(1, grid.getNumColumns());
             int width = (grid.getWidth() - grid.getPaddingLeft() - grid.getPaddingRight() - dp(10) * (columns - 1)) / columns;
             boolean everyone = all || (tagMode() && tags.matches(f.getName(), activeTags));
