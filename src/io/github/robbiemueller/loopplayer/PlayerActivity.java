@@ -45,6 +45,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Calendar;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -60,7 +61,7 @@ import java.util.concurrent.TimeUnit;
 /**
  * Full-screen, control-free video loop for signage screens, old tablets and the like (Android 5.0+).
  *
- * Plays the videos in /sdcard/Movies/loop/ forever: all of them in name order, the ones with chosen tags (see
+ * Plays the videos in /sdcard/Movies/loop/ forever: all of them in name order (leading numbers sorted as numbers), the ones with chosen tags (see
  * {@link Tags}), or the ones picked in the swipe-up panel, in the order picked (a single video loops seamlessly inside
  * the media player). Shuffle plays the loop in a fresh random order each time round. Swipe left for the next video,
  * right for the one before. Double-tap toggles the sound; holding a finger down for 3 seconds opens the settings
@@ -425,6 +426,22 @@ public class PlayerActivity extends Activity implements VideoPicker.Listener {
 
     // ---- The library and the loop ----
 
+    /** Name order, but a leading number counts as a number, so 100-x comes after 99-x rather than after 10-x. */
+    static final Comparator<File> BY_NUMBER = new Comparator<File>() {
+        @Override
+        public int compare(File a, File b) {
+            long na = leadingNumber(a.getName()), nb = leadingNumber(b.getName());
+            if (na != nb) return na < 0 ? 1 : nb < 0 ? -1 : Long.compare(na, nb);
+            return a.getName().compareTo(b.getName());
+        }
+    };
+
+    private static long leadingNumber(String name) {
+        int i = 0;
+        while (i < name.length() && i < 18 && Character.isDigit(name.charAt(i))) i++;
+        return i == 0 ? -1 : Long.parseLong(name.substring(0, i));
+    }
+
     private File folder() {
         return new File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MOVIES), "loop");
     }
@@ -434,7 +451,7 @@ public class PlayerActivity extends Activity implements VideoPicker.Listener {
         library = new ArrayList<>();
         tags = Tags.load(new File(folder(), Tags.FILE_NAME));
         if (files == null) return;
-        Arrays.sort(files);
+        Arrays.sort(files, BY_NUMBER);
         for (File f : files) {
             // Interludes stay out of the library: they come up on their own every so often.
             if (f.isFile() && isVideoName(f.getName()) && tags.interlude(f.getName()) == null) library.add(f);
